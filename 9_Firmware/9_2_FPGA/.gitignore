@@ -3,6 +3,13 @@
 *.vcd
 tb/*.vvp
 tb/*.vcd
+a.out
+
+# Test-run outputs (written by testbenches, not oracles/stimulus).
+# NOTE: golden references (.hex, .mem, doppler_golden_py_*.csv) ARE
+# committed — they are load-bearing oracles for MF/Doppler/receiver
+# cosim tests. Only TB-written CSV outputs are ignored here.
+tb/cosim/rx_final_doppler_out.csv
 
 # Vivado project files (managed separately)
 *.jou
