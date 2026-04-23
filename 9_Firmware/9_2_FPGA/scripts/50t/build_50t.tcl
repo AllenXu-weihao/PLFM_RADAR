@@ -43,7 +43,22 @@ foreach f [glob -directory $rtl_dir *.v] {
 }
 
 set_property top $top_module [current_fileset]
-set_property verilog_define {FFT_XPM_BRAM} [current_fileset]
+# FFT_USE_XILINX_IP routes xfft_2048.v's wrapper to the LogiCORE FFT v9.1 IP
+# (xfft_2048_ip) instead of the in-house fft_engine fallback. The IP closes
+# RX-NEW-3 (~6600-cycle 3-FFT chain budget vs 16700-cycle PRI).
+set_property verilog_define {FFT_XPM_BRAM FFT_USE_XILINX_IP} [current_fileset]
+
+# ===== IP CATALOG =====
+# Read the pre-generated xfft_2048_ip XCI (produced by gen_xfft_2048_ip.tcl).
+# generate_target + synth_ip prepare its OOC netlist before launch_runs.
+set xci_path [file join $project_root "ip" "xfft_2048_ip" "xfft_2048_ip.xci"]
+if {![file exists $xci_path]} {
+    puts "ERROR: $xci_path missing — run scripts/50t/gen_xfft_2048_ip.tcl first."
+    exit 1
+}
+read_ip $xci_path
+generate_target {synthesis simulation instantiation_template} [get_ips xfft_2048_ip]
+synth_ip [get_ips xfft_2048_ip]
 
 # Constraints — 50T XDC + MMCM supplement
 add_files -fileset constrs_1 -norecurse [file join $project_root "constraints" "xc7a50t_ftg256.xdc"]

@@ -69,6 +69,8 @@ PROD_RTL=(
     doppler_processor.v
     xfft_16.v
     fft_engine.v
+    xfft_2048.v
+    fft_engine_axi_bridge.v
     frequency_matched_filter.v
     usb_data_interface.v
     usb_data_interface_ft2232h.v
@@ -102,6 +104,7 @@ RECEIVER_RTL=(
     chirp_memory_loader_param.v latency_buffer.v
     matched_filter_multi_segment.v matched_filter_processing_chain.v
     range_bin_decimator.v doppler_processor.v xfft_16.v fft_engine.v
+    xfft_2048.v fft_engine_axi_bridge.v
     frequency_matched_filter.v
     rx_gain_control.v mti_canceller.v
 )
@@ -282,7 +285,7 @@ run_mf_cosim() {
     if [[ -n "$define" ]]; then
         cmd="$cmd $define"
     fi
-    cmd="$cmd -o $vvp tb/tb_mf_cosim.v matched_filter_processing_chain.v fft_engine.v frequency_matched_filter.v chirp_memory_loader_param.v"
+    cmd="$cmd -o $vvp tb/tb_mf_cosim.v matched_filter_processing_chain.v fft_engine.v xfft_2048.v fft_engine_axi_bridge.v frequency_matched_filter.v chirp_memory_loader_param.v"
 
     if ! eval "$cmd" 2>/tmp/iverilog_err_$$; then
         echo -e "${RED}COMPILE FAIL${NC}"
@@ -640,7 +643,8 @@ run_test "FIR Lowpass" \
 run_test --timeout=600 "Matched Filter Chain" \
     tb/tb_mf_reg.vvp \
     tb/tb_matched_filter_processing_chain.v matched_filter_processing_chain.v \
-    fft_engine.v chirp_memory_loader_param.v frequency_matched_filter.v
+    fft_engine.v xfft_2048.v fft_engine_axi_bridge.v \
+    chirp_memory_loader_param.v frequency_matched_filter.v
 
 # RX-B regression coverage: chain pipeline depth + full-chain
 # autocorrelation peak position. Both run the production fft_engine
@@ -649,12 +653,13 @@ run_test --timeout=600 "Matched Filter Chain" \
 run_test --timeout=120 "RX-B Chain Pipeline Latency (tb_rxb_latency_measure)" \
     tb/tb_rxb_lat_reg.vvp \
     tb/tb_rxb_latency_measure.v matched_filter_processing_chain.v \
-    fft_engine.v frequency_matched_filter.v
+    fft_engine.v xfft_2048.v fft_engine_axi_bridge.v frequency_matched_filter.v
 
 run_test --timeout=600 "RX-B Full-Chain Autocorrelation (tb_rxb_fullchain_latency)" \
     tb/tb_rxb_fc_reg.vvp \
     tb/tb_rxb_fullchain_latency.v matched_filter_multi_segment.v \
-    matched_filter_processing_chain.v fft_engine.v frequency_matched_filter.v \
+    matched_filter_processing_chain.v fft_engine.v xfft_2048.v \
+    fft_engine_axi_bridge.v frequency_matched_filter.v \
     chirp_memory_loader_param.v
 
 echo ""

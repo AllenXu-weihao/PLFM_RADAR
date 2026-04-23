@@ -151,7 +151,14 @@ wire fft_dout_valid;
 wire fft_busy;
 wire fft_done;
 
-fft_engine #(
+// xfft_2048 (Xilinx LogiCORE FFT v9.1) via fft_engine_axi_bridge — preserves
+// the legacy fft_engine port surface so this call site stays a 1-line swap.
+// In synth + remote XSim: real Pipelined Streaming IP (~N + 150 cycles/pass,
+// closes RX-NEW-3 PRI budget). In iverilog: bridge falls through to the
+// in-house fft_engine batched fallback inside xfft_2048.v (~150K cycles/pass,
+// for unit coverage only — receiver-integration timing is meaningful only in
+// XSim with the real IP).
+fft_engine_axi_bridge #(
     .N(FFT_SIZE),
     .LOG2N(ADDR_BITS),
     .DATA_W(16),

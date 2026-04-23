@@ -17,3 +17,9 @@ tb/cosim/rx_final_doppler_out.csv
 *.str
 *.bit
 *.ltx
+
+# Vivado IP build artifacts (regenerated from .xci by gen_xfft_2048_ip.tcl).
+# Only the .xci is committed — Vivado reproduces .dcp / sim-netlist / etc.
+ip/xfft_2048_ip/*
+!ip/xfft_2048_ip/xfft_2048_ip.xci
+build_xsim_xfft/
