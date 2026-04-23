@@ -98,10 +98,10 @@ class DemoTarget:
 
     __slots__ = ("azimuth", "classification", "id", "range_m", "snr", "velocity")
 
-    # Physical range grid: 64 bins x ~24 m/bin = ~1536 m max
-    # Bin spacing = c / (2 * Fs) * decimation, where Fs = 100 MHz DDC output.
-    _RANGE_PER_BIN: float = (3e8 / (2 * 100e6)) * 16  # ~24 m
-    _MAX_RANGE: float = _RANGE_PER_BIN * NUM_RANGE_BINS  # ~1536 m
+    # Physical range grid: 512 bins x ~6 m/bin = ~3072 m max (3 km mode)
+    # Bin spacing = c / (2 * Fs) * decimation, where Fs = 100 MHz DDC output, decim = 4.
+    _RANGE_PER_BIN: float = (3e8 / (2 * 100e6)) * 4  # ~6 m
+    _MAX_RANGE: float = _RANGE_PER_BIN * NUM_RANGE_BINS  # ~3072 m
 
     def __init__(self, tid: int):
         self.id = tid

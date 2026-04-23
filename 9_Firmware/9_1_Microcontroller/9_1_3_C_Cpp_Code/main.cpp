@@ -685,11 +685,21 @@ SystemError_t checkSystemHealth(void) {
     }
 
     // 3. Check ADAR1000 Communication and Temperature
+    // [MCU-N7 FIX] verifyDeviceCommunication() writes the SCRATCHPAD register
+    // and HAL_Delay(1) per device. Across 4 devices that is >=4 ms of
+    // blocking SPI per main-loop iteration (chirp jitter source). Rate-limit
+    // the comm check to every 2 s (matches the clock-check pattern at line
+    // 658). readTemperature() is single-register SPI read with no HAL_Delay,
+    // so it stays per-loop to keep PA over-temperature detection responsive.
+    static uint32_t last_adar_comm_check = 0;
+    bool run_comm_check = (HAL_GetTick() - last_adar_comm_check > 2000);
     for (int i = 0; i < 4; i++) {
-        if (!adarManager.verifyDeviceCommunication(i)) {
-            current_error = ERROR_ADAR1000_COMM;
-            DIAG_ERR("BF", "Health check: ADAR1000 #%d comm FAILED", i);
-            return current_error;
+        if (run_comm_check) {
+            if (!adarManager.verifyDeviceCommunication(i)) {
+                current_error = ERROR_ADAR1000_COMM;
+                DIAG_ERR("BF", "Health check: ADAR1000 #%d comm FAILED", i);
+                return current_error;
+            }
         }
 
         float temp = adarManager.readTemperature(i);
@@ -698,6 +708,9 @@ SystemError_t checkSystemHealth(void) {
             DIAG_ERR("BF", "Health check: ADAR1000 #%d OVERTEMP %.1fC > 85C", i, temp);
             return current_error;
         }
+    }
+    if (run_comm_check) {
+        last_adar_comm_check = HAL_GetTick();
     }
 
     // 4. Check IMU Communication
@@ -949,10 +962,19 @@ bool checkSystemHealthStatus(void) {
         DIAG_ERR("SYS", "checkSystemHealthStatus: error detected (code %d), calling handleSystemError()", error);
         handleSystemError(error);
 
-        // If we're in emergency state or too many errors, shutdown
+        // If we're in emergency state or too many errors, shutdown.
+        // [MCU-N1 FIX] Latch system_emergency_state=true on the error_count>10
+        // path too — otherwise the SAFE-MODE blink loop in main() exits in one
+        // pass (its predicate is `while(system_emergency_state)`) and the main
+        // loop continues running with PA rails already cut by
+        // systemPowerDownSequence(), still toggling new_chirp via PD8.
         if (system_emergency_state || error_count > 10) {
-            DIAG_ERR("SYS", "checkSystemHealthStatus returning FALSE (emergency=%s error_count=%lu)",
-                     system_emergency_state ? "true" : "false", error_count);
+            if (!system_emergency_state) {
+                system_emergency_state = true;
+                DIAG_ERR("SYS", "Latching system_emergency_state due to error_count > 10");
+            }
+            DIAG_ERR("SYS", "checkSystemHealthStatus returning FALSE (emergency=true error_count=%lu)",
+                     error_count);
             return false;
         }
     }
@@ -1835,6 +1857,24 @@ int main(void)
    * re-enabled) should be handled non-blocking in the main loop. */
 
   /***************************************************************/
+  /************ FPGA reset (BEFORE PA Vdd enable) ****************/
+  /***************************************************************/
+  /* [MCU-N2/N11 FIX] Reset FPGA early — before any PA-rail enables —
+   * so `adar_tr_x` is driven LOW (RX commanded externally) when the PA Vdd
+   * rail later comes up to 22 V. Without this, PA could be energised while
+   * the FPGA is still in its implicit reset and `adar_tr_x` is undefined,
+   * with the ADAR1000 already commanded to TX (TR_SOURCE=1) — a glitch
+   * could key the PA into an undefined antenna load. Kept outside the
+   * `if (PowerAmplifier)` block so the FPGA always boots cleanly even when
+   * the PA path is disabled for bench testing. TX mixer enable (PD11) is
+   * still LOW (set by MX_GPIO_Init), so no chirps fire. */
+  DIAG("FPGA", "Resetting FPGA (GPIOD pin 12: LOW -> 10ms -> HIGH)");
+  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12, GPIO_PIN_RESET);
+  HAL_Delay(10);
+  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12, GPIO_PIN_SET);
+  DIAG("FPGA", "FPGA reset complete -- adar_tr_x driven LOW (RX commanded)");
+
+  /***************************************************************/
   /************RF Power Amplifier Powering up sequence************/
   /***************************************************************/
   if(PowerAmplifier){
@@ -1891,6 +1931,10 @@ int main(void)
 	  HAL_GPIO_WritePin(DAC_2_VG_LDAC_GPIO_Port, DAC_2_VG_LDAC_Pin, GPIO_PIN_SET);
 
 	  //Enable RF Power Amplifier VDD = 22V
+	  /* [MCU-N2/N11] FPGA has already been reset earlier (before this PA block)
+	   * so `adar_tr_x` is now driven LOW (RX commanded). Safe to bring PA Vdd
+	   * up to 22 V here. TX mixer enable (PD11) is still LOW until later,
+	   * gating any FPGA-driven chirps. */
 	  DIAG("PA", "Enabling RFPA VDD=22V (EN_DIS_RFPA_VDD HIGH)");
 	  HAL_GPIO_WritePin(EN_DIS_RFPA_VDD_GPIO_Port, EN_DIS_RFPA_VDD_Pin, GPIO_PIN_SET);
 
@@ -1971,12 +2015,10 @@ int main(void)
 	  DIAG("PA", "PA IDQ calibration sequence COMPLETE");
   }
 
-  //RESET FPGA
-  DIAG("FPGA", "Resetting FPGA (GPIOD pin 12: LOW -> 10ms -> HIGH)");
-  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12, GPIO_PIN_RESET);
-  HAL_Delay(10);
-  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_12, GPIO_PIN_SET);
-  DIAG("FPGA", "FPGA reset complete");
+  /* [MCU-N2/N11] FPGA was already reset earlier in the boot sequence,
+   * before PA Vdd was energised, to avoid an undefined `adar_tr_x` window.
+   * No further reset needed here. Leaving the comment so future readers
+   * understand why this block looks like it should be present. */
 
 
 
@@ -2730,7 +2772,7 @@ static void MX_GPIO_Init(void)
                           |EN_P_3V3_VDD_SW_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_8|GPIO_PIN_9|GPIO_PIN_10|GPIO_PIN_11
+  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_8|GPIO_PIN_9|GPIO_PIN_10|GPIO_PIN_11|GPIO_PIN_12
                           |STEPPER_CW_P_Pin|STEPPER_CLK_P_Pin|EN_DIS_RFPA_VDD_Pin|EN_DIS_COOLING_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */

@@ -66,8 +66,8 @@ class TestRadarSettings(unittest.TestCase):
     def test_defaults(self):
         s = _models().RadarSettings()
         self.assertEqual(s.system_frequency, 10.5e9)
-        self.assertEqual(s.coverage_radius, 1536)
-        self.assertEqual(s.max_distance, 1536)
+        self.assertEqual(s.coverage_radius, 3072)
+        self.assertEqual(s.max_distance, 3072)
 
 
 class TestGPSData(unittest.TestCase):
@@ -430,17 +430,17 @@ class TestWaveformConfig(unittest.TestCase):
         self.assertEqual(wc.chirp_duration_s, 30e-6)
         self.assertEqual(wc.pri_s, 167e-6)
         self.assertEqual(wc.center_freq_hz, 10.5e9)
-        self.assertEqual(wc.n_range_bins, 64)
+        self.assertEqual(wc.n_range_bins, 512)
         self.assertEqual(wc.n_doppler_bins, 32)
         self.assertEqual(wc.chirps_per_subframe, 16)
-        self.assertEqual(wc.fft_size, 1024)
-        self.assertEqual(wc.decimation_factor, 16)
+        self.assertEqual(wc.fft_size, 2048)
+        self.assertEqual(wc.decimation_factor, 4)
 
     def test_range_resolution(self):
-        """range_resolution_m should be ~23.98 m/bin (matched filter, 100 MSPS)."""
+        """range_resolution_m should be ~6.0 m/bin (matched filter, 100 MSPS, decim 4)."""
         from v7.models import WaveformConfig
         wc = WaveformConfig()
-        self.assertAlmostEqual(wc.range_resolution_m, 23.983, places=1)
+        self.assertAlmostEqual(wc.range_resolution_m, 5.996, places=2)
 
     def test_velocity_resolution(self):
         """velocity_resolution_mps should be ~5.34 m/s/bin (PRI=167us, 16 chirps)."""
@@ -452,7 +452,7 @@ class TestWaveformConfig(unittest.TestCase):
         """max_range_m = range_resolution * n_range_bins."""
         from v7.models import WaveformConfig
         wc = WaveformConfig()
-        self.assertAlmostEqual(wc.max_range_m, wc.range_resolution_m * 64, places=1)
+        self.assertAlmostEqual(wc.max_range_m, wc.range_resolution_m * 512, places=1)
 
     def test_max_velocity(self):
         """max_velocity_mps = velocity_resolution * n_doppler_bins / 2."""
@@ -927,9 +927,9 @@ class TestExtractTargetsFromFrame(unittest.TestCase):
         """Detection at range bin 10 → range = 10 * range_resolution."""
         from v7.processing import extract_targets_from_frame
         frame = self._make_frame(det_cells=[(10, 16)])  # dbin=16 = center → vel=0
-        targets = extract_targets_from_frame(frame, range_resolution=23.983)
+        targets = extract_targets_from_frame(frame, range_resolution=5.996)
         self.assertEqual(len(targets), 1)
-        self.assertAlmostEqual(targets[0].range, 10 * 23.983, places=1)
+        self.assertAlmostEqual(targets[0].range, 10 * 5.996, places=1)
         self.assertAlmostEqual(targets[0].velocity, 0.0, places=2)
 
     def test_velocity_sign(self):

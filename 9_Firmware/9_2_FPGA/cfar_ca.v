@@ -61,8 +61,11 @@
 
 `include "radar_params.vh"
 
+// [RX-D FIX] NUM_RANGE_BINS and range_bin port widths now scale with
+// `RP_MAX_OUTPUT_BINS / `RP_RANGE_BIN_WIDTH_MAX (50T: 512/9, 200T: 4096/12).
+// CFAR magnitude BRAM depth uses `RP_CFAR_MAG_DEPTH which already scales.
 module cfar_ca #(
-    parameter NUM_RANGE_BINS   = `RP_NUM_RANGE_BINS,    // 512
+    parameter NUM_RANGE_BINS   = `RP_MAX_OUTPUT_BINS,   // 512 (50T) / 4096 (200T)
     parameter NUM_DOPPLER_BINS = `RP_NUM_DOPPLER_BINS,  // 32
     parameter MAG_WIDTH        = 17,
     parameter ALPHA_WIDTH      = 8,
@@ -76,7 +79,7 @@ module cfar_ca #(
     input wire [31:0] doppler_data,
     input wire        doppler_valid,
     input wire [4:0]  doppler_bin_in,
-    input wire [`RP_RANGE_BIN_BITS-1:0] range_bin_in,  // 9-bit
+    input wire [`RP_RANGE_BIN_WIDTH_MAX-1:0] range_bin_in,  // 9-bit (50T) / 12-bit (200T)
     input wire        frame_complete,
 
     // ========== CONFIGURATION ==========
@@ -90,7 +93,7 @@ module cfar_ca #(
     // ========== DETECTION OUTPUTS ==========
     output reg        detect_flag,
     output reg        detect_valid,
-    output reg [`RP_RANGE_BIN_BITS-1:0] detect_range,  // 9-bit
+    output reg [`RP_RANGE_BIN_WIDTH_MAX-1:0] detect_range,  // 9-bit (50T) / 12-bit (200T)
     output reg [4:0]  detect_doppler,
     output reg [MAG_WIDTH-1:0] detect_magnitude,
     output reg [MAG_WIDTH-1:0] detect_threshold,
@@ -105,10 +108,10 @@ module cfar_ca #(
 // INTERNAL PARAMETERS
 // ============================================================================
 localparam TOTAL_CELLS = NUM_RANGE_BINS * NUM_DOPPLER_BINS;
-localparam ADDR_WIDTH  = `RP_CFAR_MAG_ADDR_W;  // 14
+localparam ADDR_WIDTH  = `RP_CFAR_MAG_ADDR_W;          // 14 (50T) / 17 (200T)
 localparam COL_BITS    = 5;
-localparam ROW_BITS    = `RP_RANGE_BIN_BITS;    // 9
-localparam SUM_WIDTH   = MAG_WIDTH + ROW_BITS;  // 26 bits: sum of up to 512 magnitudes
+localparam ROW_BITS    = `RP_RANGE_BIN_WIDTH_MAX;      // 9 (50T) / 12 (200T)
+localparam SUM_WIDTH   = MAG_WIDTH + ROW_BITS;         // 26 (50T) / 29 (200T)
 localparam PROD_WIDTH  = SUM_WIDTH + ALPHA_WIDTH;  // 34 bits
 localparam ALPHA_FRAC_BITS = 4;  // Q4.4
 

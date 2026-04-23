@@ -109,11 +109,11 @@ class RadarSettings:
     the actual waveform parameters.
     """
     system_frequency: float = 10.5e9    # Hz (carrier, used for velocity calc)
-    range_resolution: float = 24.0       # Meters per range bin (c/(2*Fs)*decim)
+    range_resolution: float = 6.0        # Meters per range bin (c/(2*Fs)*decim = 1.5*4)
     velocity_resolution: float = 1.0     # m/s per Doppler bin (calibrate to waveform)
-    max_distance: float = 1536           # Max detection range (m)
-    map_size: float = 2000               # Map display size (m)
-    coverage_radius: float = 1536        # Map coverage radius (m)
+    max_distance: float = 3072           # Max detection range (m), 3 km mode
+    map_size: float = 4000               # Map display size (m)
+    coverage_radius: float = 3072        # Map coverage radius (m), 3 km mode
 
 
 @dataclass
@@ -211,11 +211,11 @@ class WaveformConfig:
     chirp_duration_s: float = 30e-6      # Long chirp ramp time
     pri_s: float = 167e-6               # Pulse repetition interval (chirp + listen)
     center_freq_hz: float = 10.5e9       # Carrier frequency (radar_scene.py: F_CARRIER)
-    n_range_bins: int = 64               # After decimation
+    n_range_bins: int = 512              # After decimation (3 km mode; 4096 in 20 km)
     n_doppler_bins: int = 32             # Total Doppler bins (2 sub-frames x 16)
     chirps_per_subframe: int = 16        # Chirps in one Doppler sub-frame
-    fft_size: int = 1024                 # Pre-decimation FFT length
-    decimation_factor: int = 16          # 1024 → 64
+    fft_size: int = 2048                 # Pre-decimation FFT length
+    decimation_factor: int = 4           # 2048 → 512
 
     @property
     def range_resolution_m(self) -> float:

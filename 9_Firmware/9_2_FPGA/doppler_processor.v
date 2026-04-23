@@ -35,21 +35,17 @@
 `include "radar_params.vh"
 
 // ----------------------------------------------------------------------------
-// !!! 200T 20 km MODE BROKEN — FIX BEFORE 200T BRING-UP !!!
-// RANGE_BINS and the range_bin output port default to `RP_NUM_RANGE_BINS
-// (512) / `RP_RANGE_BIN_BITS (9). In 20 km mode the upstream pipeline
-// emits `RP_OUTPUT_RANGE_BINS_20KM = 4096 bins/chirp, which the internal
-// range-bin BRAMs and address counters here cannot represent — bins
-// 512..4095 alias onto bins 0..511 and the Doppler FFT collects a
-// scrambled slow-time vector per aliased range cell.
-// Latent on XC7A50T (SUPPORT_LONG_RANGE undefined → 3 km only); will
-// corrupt all 20 km output on XC7A200T. Before 200T bring-up: scale
-// RANGE_BINS with `RP_MAX_OUTPUT_BINS, widen range_bin, and resize the
-// per-range chirp buffers, or route 20 km mode around this block.
+// [RX-D FIX] RANGE_BINS and range_bin port now scale with `RP_MAX_OUTPUT_BINS
+// and `RP_RANGE_BIN_WIDTH_MAX (auto-conditional on SUPPORT_LONG_RANGE).
+//   50T  (no SUPPORT_LONG_RANGE): 512 bins / 9-bit  — 3 km only
+//   200T (SUPPORT_LONG_RANGE):    4096 bins / 12-bit — 3 km and 20 km
+// In 3 km mode the upstream produces 512 bins (uses bins 0..511 only on 200T).
+// In 20 km mode the upstream produces 4096 bins, which the BRAMs and counters
+// can now represent without aliasing.
 // ----------------------------------------------------------------------------
 module doppler_processor_optimized #(
     parameter DOPPLER_FFT_SIZE   = `RP_DOPPLER_FFT_SIZE,    // 16
-    parameter RANGE_BINS         = `RP_NUM_RANGE_BINS,      // 512
+    parameter RANGE_BINS         = `RP_MAX_OUTPUT_BINS,     // 512 (50T) / 4096 (200T)
     parameter CHIRPS_PER_FRAME   = `RP_CHIRPS_PER_FRAME,    // 32
     parameter CHIRPS_PER_SUBFRAME = `RP_CHIRPS_PER_SUBFRAME, // 16
     parameter WINDOW_TYPE        = 0,      // 0=Hamming, 1=Rectangular
@@ -63,7 +59,7 @@ module doppler_processor_optimized #(
     output reg [31:0] doppler_output,
     output reg doppler_valid,
     output reg [4:0] doppler_bin,      // {sub_frame, bin[3:0]}
-    output reg [`RP_RANGE_BIN_BITS-1:0] range_bin,  // 9-bit
+    output reg [`RP_RANGE_BIN_WIDTH_MAX-1:0] range_bin,  // 9-bit (50T) / 12-bit (200T)
     output reg sub_frame,              // 0=long PRI, 1=short PRI
     output wire processing_active,
     output wire frame_complete,
@@ -74,9 +70,9 @@ module doppler_processor_optimized #(
     output wire [2:0]  fv_state,
     output wire [`RP_DOPPLER_MEM_ADDR_W-1:0] fv_mem_write_addr,
     output wire [`RP_DOPPLER_MEM_ADDR_W-1:0] fv_mem_read_addr,
-    output wire [`RP_RANGE_BIN_BITS-1:0]     fv_write_range_bin,
+    output wire [`RP_RANGE_BIN_WIDTH_MAX-1:0]     fv_write_range_bin,
     output wire [4:0]  fv_write_chirp_index,
-    output wire [`RP_RANGE_BIN_BITS-1:0]     fv_read_range_bin,
+    output wire [`RP_RANGE_BIN_WIDTH_MAX-1:0]     fv_read_range_bin,
     output wire [4:0]  fv_read_doppler_index,
     output wire [9:0]  fv_processing_timeout,
     output wire        fv_frame_buffer_full,
@@ -130,9 +126,9 @@ localparam MEM_DEPTH = RANGE_BINS * CHIRPS_PER_FRAME;
 // ==============================================
 // Control Registers
 // ==============================================
-reg [`RP_RANGE_BIN_BITS-1:0] write_range_bin;
+reg [`RP_RANGE_BIN_WIDTH_MAX-1:0] write_range_bin;
 reg [4:0] write_chirp_index;
-reg [`RP_RANGE_BIN_BITS-1:0] read_range_bin;
+reg [`RP_RANGE_BIN_WIDTH_MAX-1:0] read_range_bin;
 reg [4:0] read_doppler_index;
 reg frame_buffer_full;
 reg [9:0] chirps_received;

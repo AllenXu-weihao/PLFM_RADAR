@@ -24,7 +24,7 @@ module radar_receiver_final (
     output wire [31:0] doppler_output,
     output wire doppler_valid,
     output wire [4:0] doppler_bin,
-    output wire [`RP_RANGE_BIN_BITS-1:0] range_bin,  // 9-bit
+    output wire [`RP_RANGE_BIN_WIDTH_MAX-1:0] range_bin,  // 9-bit
     
     // Raw matched-filter output (debug/bring-up)
     output wire signed [15:0] range_profile_i_out,
@@ -158,9 +158,15 @@ wire doppler_frame_done_level;  // raw level from doppler_processor
 reg  doppler_frame_done_prev;
 wire doppler_frame_done;        // rising-edge pulse (1 clk cycle)
 
+// [RX-E FIX] doppler_frame_done_level is HIGH at reset (state==S_IDLE,
+// frame_buffer_full==0). Initializing prev to 1'b0 produces a spurious
+// rising-edge pulse on cycle 1, before any real frame has been processed,
+// which causes a stale AGC gain update and a phantom CFAR tick. Initialize
+// prev to 1'b1 so the first edge fires only after the doppler processor
+// actually exits idle for a real frame and returns.
 always @(posedge clk or negedge reset_n) begin
     if (!reset_n)
-        doppler_frame_done_prev <= 1'b0;
+        doppler_frame_done_prev <= 1'b1;
     else
         doppler_frame_done_prev <= doppler_frame_done_level;
 end
@@ -172,13 +178,13 @@ assign doppler_frame_done_out = doppler_frame_done;
 wire signed [15:0] decimated_range_i;
 wire signed [15:0] decimated_range_q;
 wire decimated_range_valid;
-wire [`RP_RANGE_BIN_BITS-1:0] decimated_range_bin;  // 9-bit
+wire [`RP_RANGE_BIN_WIDTH_MAX-1:0] decimated_range_bin;  // 9-bit
 
 // ========== MTI CANCELLER SIGNALS ==========
 wire signed [15:0] mti_range_i;
 wire signed [15:0] mti_range_q;
 wire mti_range_valid;
-wire [`RP_RANGE_BIN_BITS-1:0] mti_range_bin;  // 9-bit
+wire [`RP_RANGE_BIN_WIDTH_MAX-1:0] mti_range_bin;  // 9-bit
 wire mti_first_chirp;
 
 // ========== RADAR MODE CONTROLLER SIGNALS ==========
@@ -383,28 +389,32 @@ chirp_memory_loader_param chirp_mem (
     .mem_ready(mem_ready)
 );
 
-// 4. CRITICAL: Reference Chirp Latency Buffer
-// This aligns reference data with FFT output (3187 cycle delay)
-// TODO: verify empirically during hardware bring-up with correlation test
-wire [15:0] delayed_ref_i, delayed_ref_q;
-wire mem_ready_delayed;
-
-latency_buffer #(
-    .DATA_WIDTH(32),  // 16-bit I + 16-bit Q
-	.LATENCY(3187)
-) ref_latency_buffer (
-    .clk(clk),
-    .reset_n(reset_n),
-    .data_in({ref_i, ref_q}),
-    .valid_in(mem_request),
-    .data_out({delayed_ref_i, delayed_ref_q}),
-    .valid_out(mem_ready_delayed)
-);
-
-// Assign delayed reference signals (single pair — chirp_memory_loader_param
-// selects long/short reference upstream via use_long_chirp)
-assign ref_chirp_real = delayed_ref_i;
-assign ref_chirp_imag = delayed_ref_q;
+// 4. [RX-B FIX, Option A 2026-04-23] Reference chirp wired to MF chain with
+// a single-FF alignment delay. Previously ran through `latency_buffer` with
+// LATENCY=3187 — that module is a count-N-valid-pulses-then-prime FIFO,
+// not a true cycle delay. It needed ~2 frames of mem_request pulses before
+// any ref reached the chain (so frame 1 saw all-zero ref → noise output).
+// Removed in favour of a direct-wire path with one FF.
+//
+// Why the 1-FF stage: multi_segment ST_PROCESSING latches `adc_data` through
+// one register stage (`fft_input_i <= buf_rdata_i`) before it reaches the
+// chain. The ref path from chirp_memory_loader is combinational into the
+// chain. Without compensation, ref leads sig by 1 cycle → autocorrelation
+// peak at bin 1 instead of bin 0 (verified in tb/tb_rxb_fullchain_latency.v
+// against fft_engine.v synthesis path: peak/mean ratio ~80× confirms clean
+// correlation; peak position fixed to bin 0 by this register stage).
+reg [15:0] ref_chirp_real_d, ref_chirp_imag_d;
+always @(posedge clk or negedge reset_n) begin
+    if (!reset_n) begin
+        ref_chirp_real_d <= 16'd0;
+        ref_chirp_imag_d <= 16'd0;
+    end else begin
+        ref_chirp_real_d <= ref_i;
+        ref_chirp_imag_d <= ref_q;
+    end
+end
+assign ref_chirp_real = ref_chirp_real_d;
+assign ref_chirp_imag = ref_chirp_imag_d;
 
 // 5. Dual Chirp Matched Filter
 
@@ -449,7 +459,7 @@ matched_filter_multi_segment mf_dual (
 // Convert 2048 range bins to 512 bins for Doppler
 range_bin_decimator #(
     .INPUT_BINS(`RP_FFT_SIZE),              // 2048
-    .OUTPUT_BINS(`RP_NUM_RANGE_BINS),       // 512
+    .OUTPUT_BINS(`RP_MAX_OUTPUT_BINS),      // 512 (50T) / 4096 (200T)  [RX-D]
     .DECIMATION_FACTOR(`RP_DECIMATION_FACTOR)  // 4
 ) range_decim (
     .clk(clk),
@@ -471,7 +481,7 @@ range_bin_decimator #(
 // H(z) = 1 - z^{-1} → null at DC Doppler, removes stationary clutter.
 // When host_mti_enable=0: transparent pass-through.
 mti_canceller #(
-    .NUM_RANGE_BINS(`RP_NUM_RANGE_BINS),    // 512
+    .NUM_RANGE_BINS(`RP_MAX_OUTPUT_BINS),   // 512 (50T) / 4096 (200T)  [RX-D]
     .DATA_WIDTH(`RP_DATA_WIDTH)             // 16
 ) mti_inst (
     .clk(clk),
@@ -528,7 +538,7 @@ assign range_data_valid = mti_range_valid;
 // ========== DOPPLER PROCESSOR ==========
 doppler_processor_optimized #(
     .DOPPLER_FFT_SIZE(`RP_DOPPLER_FFT_SIZE),        // 16
-    .RANGE_BINS(`RP_NUM_RANGE_BINS),                // 512
+    .RANGE_BINS(`RP_MAX_OUTPUT_BINS),               // 512 (50T) / 4096 (200T)  [RX-D]
     .CHIRPS_PER_FRAME(`RP_CHIRPS_PER_FRAME),        // 32
     .CHIRPS_PER_SUBFRAME(`RP_CHIRPS_PER_SUBFRAME)   // 16
 ) doppler_proc (

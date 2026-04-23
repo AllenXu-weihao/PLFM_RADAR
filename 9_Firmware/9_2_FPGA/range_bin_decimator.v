@@ -32,9 +32,13 @@
 
 `include "radar_params.vh"
 
+// [RX-D FIX] OUTPUT_BINS and range_bin_index now scale with
+// `RP_MAX_OUTPUT_BINS / `RP_RANGE_BIN_WIDTH_MAX so 20 km mode gets the
+// full 4096-bin range axis (8 segments × 512 decimated bins per segment).
+// 50T: 512 / 9-bit. 200T: 4096 / 12-bit.
 module range_bin_decimator #(
     parameter INPUT_BINS        = `RP_FFT_SIZE,          // 2048
-    parameter OUTPUT_BINS       = `RP_NUM_RANGE_BINS,    // 512
+    parameter OUTPUT_BINS       = `RP_MAX_OUTPUT_BINS,   // 512 (50T) / 4096 (200T)
     parameter DECIMATION_FACTOR = `RP_DECIMATION_FACTOR  // 4
 ) (
     input wire clk,
@@ -49,7 +53,7 @@ module range_bin_decimator #(
     output reg signed [15:0] range_i_out,
     output reg signed [15:0] range_q_out,
     output reg range_valid_out,
-    output reg [`RP_RANGE_BIN_BITS-1:0] range_bin_index,  // 9-bit
+    output reg [`RP_RANGE_BIN_WIDTH_MAX-1:0] range_bin_index,  // 9-bit / 12-bit
 
     // Configuration
     input wire [1:0] decimation_mode,  // 00=decimate, 01=peak, 10=average
@@ -82,7 +86,7 @@ reg [10:0] in_bin_count;
 
 // Group tracking
 reg [1:0] group_sample_count;   // 0..3 within current group of 4
-reg [8:0] output_bin_count;     // 0..511 output bin index
+reg [`RP_RANGE_BIN_WIDTH_MAX-1:0] output_bin_count;  // 0..OUTPUT_BINS-1
 
 // State machine
 reg [2:0] state;
@@ -146,7 +150,7 @@ always @(posedge clk or negedge reset_n) begin
         range_valid_out   <= 1'b0;
         range_i_out       <= 16'd0;
         range_q_out       <= 16'd0;
-        range_bin_index   <= {`RP_RANGE_BIN_BITS{1'b0}};
+        range_bin_index   <= {`RP_RANGE_BIN_WIDTH_MAX{1'b0}};
         peak_i            <= 16'd0;
         peak_q            <= 16'd0;
         peak_mag          <= 17'd0;

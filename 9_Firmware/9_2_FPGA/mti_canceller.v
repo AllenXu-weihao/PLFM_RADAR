@@ -44,20 +44,16 @@
 `include "radar_params.vh"
 
 // ----------------------------------------------------------------------------
-// !!! 200T 20 km MODE BROKEN — FIX BEFORE 200T BRING-UP !!!
-// The prev-chirp BRAM buffer is sized to NUM_RANGE_BINS (512) and the
-// range_bin_in port is 9 bits (`RP_RANGE_BIN_BITS). In 20 km mode the
-// upstream range_bin_decimator emits `RP_OUTPUT_RANGE_BINS_20KM = 4096
-// bins per chirp (8 segments × 512 decimated bins), which aliases into
-// the 9-bit address space and collapses bins 512..4095 onto bins 0..511.
-// On XC7A50T this is latent (SUPPORT_LONG_RANGE undefined → 3 km only),
-// but on XC7A200T with SUPPORT_LONG_RANGE the 20 km data path will
-// silently corrupt every range cell above 3 km.
-// Fix before 200T bring-up: scale NUM_RANGE_BINS/range_bin width with
-// `RP_MAX_OUTPUT_BINS, or gate MTI off entirely in 20 km mode.
+// [RX-D FIX] NUM_RANGE_BINS and range_bin port widths now scale with
+// `RP_MAX_OUTPUT_BINS and `RP_RANGE_BIN_WIDTH_MAX (conditional on
+// SUPPORT_LONG_RANGE):
+//   50T  (no SUPPORT_LONG_RANGE): 512 bins / 9-bit  — 3 km only
+//   200T (SUPPORT_LONG_RANGE):    4096 bins / 12-bit — supports 20 km mode
+// The prev-chirp BRAM buffer auto-resizes accordingly; in 20 km mode all
+// 4096 range cells are stored without aliasing.
 // ----------------------------------------------------------------------------
 module mti_canceller #(
-    parameter NUM_RANGE_BINS = `RP_NUM_RANGE_BINS,    // 512
+    parameter NUM_RANGE_BINS = `RP_MAX_OUTPUT_BINS,   // 512 (50T) / 4096 (200T)
     parameter DATA_WIDTH     = `RP_DATA_WIDTH         // 16
 ) (
     input wire clk,
@@ -67,13 +63,13 @@ module mti_canceller #(
     input wire signed [DATA_WIDTH-1:0] range_i_in,
     input wire signed [DATA_WIDTH-1:0] range_q_in,
     input wire                         range_valid_in,
-    input wire [`RP_RANGE_BIN_BITS-1:0] range_bin_in,   // 9-bit
+    input wire [`RP_RANGE_BIN_WIDTH_MAX-1:0] range_bin_in,   // 9-bit (50T) / 12-bit (200T)
 
     // ========== OUTPUT (to Doppler processor) ==========
     output reg signed [DATA_WIDTH-1:0] range_i_out,
     output reg signed [DATA_WIDTH-1:0] range_q_out,
     output reg                         range_valid_out,
-    output reg [`RP_RANGE_BIN_BITS-1:0] range_bin_out,   // 9-bit
+    output reg [`RP_RANGE_BIN_WIDTH_MAX-1:0] range_bin_out,  // 9-bit (50T) / 12-bit (200T)
 
     // ========== CONFIGURATION ==========
     input wire mti_enable,   // 1=MTI active, 0=pass-through
@@ -111,7 +107,7 @@ module mti_canceller #(
 
 reg signed [DATA_WIDTH-1:0] range_i_d1, range_q_d1;
 reg                         range_valid_d1;
-reg [`RP_RANGE_BIN_BITS-1:0] range_bin_d1;
+reg [`RP_RANGE_BIN_WIDTH_MAX-1:0] range_bin_d1;
 reg                         mti_enable_d1;
 reg                         use_long_chirp_d1;
 
@@ -120,7 +116,7 @@ always @(posedge clk or negedge reset_n) begin
         range_i_d1        <= {DATA_WIDTH{1'b0}};
         range_q_d1        <= {DATA_WIDTH{1'b0}};
         range_valid_d1    <= 1'b0;
-        range_bin_d1      <= {`RP_RANGE_BIN_BITS{1'b0}};
+        range_bin_d1      <= {`RP_RANGE_BIN_WIDTH_MAX{1'b0}};
         mti_enable_d1     <= 1'b0;
         use_long_chirp_d1 <= 1'b0;
     end else begin
@@ -211,7 +207,7 @@ always @(posedge clk or negedge reset_n) begin
         range_i_out          <= {DATA_WIDTH{1'b0}};
         range_q_out          <= {DATA_WIDTH{1'b0}};
         range_valid_out      <= 1'b0;
-        range_bin_out        <= {`RP_RANGE_BIN_BITS{1'b0}};
+        range_bin_out        <= {`RP_RANGE_BIN_WIDTH_MAX{1'b0}};
         has_previous         <= 1'b0;
         mti_first_chirp      <= 1'b1;
         prev_chirp_was_long  <= 1'b0;

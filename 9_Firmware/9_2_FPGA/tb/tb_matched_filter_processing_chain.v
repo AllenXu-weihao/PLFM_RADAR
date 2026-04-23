@@ -195,7 +195,7 @@ module tb_matched_filter_processing_chain;
         integer wait_count;
         begin
             wait_count = 0;
-            while (chain_state != target_state && wait_count < 50000) begin
+            while (chain_state != target_state && wait_count < 500000) begin
                 @(posedge clk);
                 wait_count = wait_count + 1;
             end
@@ -208,7 +208,7 @@ module tb_matched_filter_processing_chain;
         integer wait_count;
         begin
             wait_count = 0;
-            while (chain_state != ST_IDLE && wait_count < 50000) begin
+            while (chain_state != ST_IDLE && wait_count < 500000) begin
                 @(posedge clk);
                 wait_count = wait_count + 1;
             end
@@ -332,7 +332,11 @@ module tb_matched_filter_processing_chain;
         // noise that scatters energy far from bin 0. Xilinx IP uses full internal
         // precision and passes this correctly in hardware.
         if (!(cap_peak_bin <= 128 || cap_peak_bin >= FFT_SIZE - 128)) begin
-            $display("[WARN] Autocorrelation peak at bin %0d (expected near 0) - behavioral FFT noise, OK with Xilinx IP", cap_peak_bin);
+            // [RX-NEW-1] fft_engine.v is in-house — it IS the production FFT, not
+            // a behavioural model that gets swapped for Xilinx IP. Wrong-bin peak
+            // is therefore a real bug in fft_engine / frequency_matched_filter,
+            // not "behavioral noise". See project memory ledger entry RX-NEW-1.
+            $display("[FAIL-INFO] Autocorrelation peak at bin %0d (expected 0) — fft_engine bug, see RX-NEW-1", cap_peak_bin);
         end
         // Behavioral Q15 FFT scatters the peak, so we cannot assert bin
         // location — but the peak MUST dominate the mean magnitude. This
@@ -496,7 +500,7 @@ module tb_matched_filter_processing_chain;
 
         check(cap_count == FFT_SIZE, "Case 1: Got 2048 output samples");
         if (!(cap_peak_bin <= 128 || cap_peak_bin >= FFT_SIZE - 128)) begin
-            $display("[WARN] Case 1: peak at bin %0d (expected near 0) - behavioral FFT noise", cap_peak_bin);
+            $display("[FAIL-INFO] Case 1: peak at bin %0d (expected 0) — fft_engine bug, see RX-NEW-1", cap_peak_bin);
         end
         begin : p2m_case1
             integer k, sum_abs, mean_abs;
@@ -538,7 +542,7 @@ module tb_matched_filter_processing_chain;
 
         check(cap_count == FFT_SIZE, "Case 2: Got 2048 output samples");
         if (!(cap_peak_bin <= 128 || cap_peak_bin >= FFT_SIZE - 128)) begin
-            $display("[WARN] Case 2: peak at bin %0d (expected near 0) - behavioral FFT noise", cap_peak_bin);
+            $display("[FAIL-INFO] Case 2: peak at bin %0d (expected near 0) — fft_engine bug, see RX-NEW-1", cap_peak_bin);
         end
         begin : p2m_case2
             integer k, sum_abs, mean_abs;

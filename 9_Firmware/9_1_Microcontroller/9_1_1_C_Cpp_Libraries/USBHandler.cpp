@@ -77,20 +77,24 @@ void USBHandler::processSettingsData(const uint8_t* data, uint32_t length) {
     DIAG("USB", "  settings buffer: +%lu bytes, total=%lu/%u", (unsigned long)bytes_to_copy, (unsigned long)buffer_index, MAX_BUFFER_SIZE);
     
     // Check if we have a complete settings packet (contains "SET" and "END")
-    if (buffer_index >= 74) {  // Minimum size for valid settings packet
+    // Minimum valid packet is "SET" + 9 doubles + 1 uint32 + "END" = 82 bytes
+    // (matches RadarSettings::parseFromUSB length check).
+    if (buffer_index >= 82) {
         // Look for "SET" at beginning and "END" somewhere in the packet
         bool has_set = (memcmp(usb_buffer, "SET", 3) == 0);
         bool has_end = false;
-        
+        uint32_t packet_len = 0;
+
         DIAG_BOOL("USB", "  packet starts with SET", has_set);
-        
+
         for (uint32_t i = 3; i <= buffer_index - 3; i++) {
             if (memcmp(usb_buffer + i, "END", 3) == 0) {
                 has_end = true;
-                DIAG("USB", "  END marker found at offset %lu, packet_len=%lu", (unsigned long)i, (unsigned long)(i + 3));
-                
+                packet_len = i + 3;
+                DIAG("USB", "  END marker found at offset %lu, packet_len=%lu", (unsigned long)i, (unsigned long)packet_len);
+
                 // Parse the complete packet up to "END"
-                if (has_set && current_settings.parseFromUSB(usb_buffer, i + 3)) {
+                if (has_set && current_settings.parseFromUSB(usb_buffer, packet_len)) {
                     current_state = USBState::READY_FOR_DATA;
                     DIAG("USB", "  Settings parsed OK, state -> READY_FOR_DATA");
                 } else {
@@ -99,11 +103,19 @@ void USBHandler::processSettingsData(const uint8_t* data, uint32_t length) {
                 break;
             }
         }
-        
-        // If we didn't find a valid packet but buffer is full, reset
-        if (buffer_index >= MAX_BUFFER_SIZE && !has_end) {
+
+        // [MCU-N9 FIX] Drain the consumed packet bytes (or false-positive END)
+        // so a parse failure doesn't leave the buffer stuck on the same bytes
+        // until MAX_BUFFER_SIZE overflow. Slide any remaining bytes left.
+        if (has_end && packet_len > 0) {
+            uint32_t remaining = buffer_index - packet_len;
+            if (remaining > 0) {
+                memmove(usb_buffer, usb_buffer + packet_len, remaining);
+            }
+            buffer_index = remaining;
+        } else if (buffer_index >= MAX_BUFFER_SIZE) {
             DIAG_WARN("USB", "  Buffer full (%u) without END marker -- resetting", MAX_BUFFER_SIZE);
-            buffer_index = 0;  // Reset buffer to avoid overflow
+            buffer_index = 0;
         }
     }
 }

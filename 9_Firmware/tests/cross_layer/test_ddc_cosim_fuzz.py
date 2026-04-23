@@ -31,11 +31,9 @@ minutes.
 """
 from __future__ import annotations
 
-import os
 import random
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -131,8 +129,12 @@ def _run_seed(seed: int, vvp: Path, work: Path) -> tuple[int, list[tuple[int, in
         f"+csv={csv_path}",
         f"+tag=seed{seed:04d}",
     ]
-    res = subprocess.run(cmd, cwd=FPGA_DIR, capture_output=True, text=True, check=False, timeout=120)
-    assert res.returncode == 0, f"vvp exit={res.returncode}\nstdout:\n{res.stdout}\nstderr:\n{res.stderr}"
+    res = subprocess.run(
+        cmd, cwd=FPGA_DIR, capture_output=True, text=True, check=False, timeout=120,
+    )
+    assert res.returncode == 0, (
+        f"vvp exit={res.returncode}\nstdout:\n{res.stdout}\nstderr:\n{res.stderr}"
+    )
     assert csv_path.exists(), (
         f"vvp completed rc=0 but CSV was not produced at {csv_path}\n"
         f"cmd: {cmd}\nstdout:\n{res.stdout[-2000:]}\nstderr:\n{res.stderr[-500:]}"
@@ -141,7 +143,9 @@ def _run_seed(seed: int, vvp: Path, work: Path) -> tuple[int, list[tuple[int, in
     rows = []
     with csv_path.open() as fh:
         header = fh.readline()
-        assert "baseband_i" in header and "baseband_q" in header, f"unexpected CSV header: {header!r}"
+        assert "baseband_i" in header and "baseband_q" in header, (
+            f"unexpected CSV header: {header!r}"
+        )
         for line in fh:
             parts = line.strip().split(",")
             if len(parts) != 3:

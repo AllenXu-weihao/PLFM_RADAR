@@ -127,7 +127,7 @@ module radar_system_top (
     output wire [31:0] dbg_doppler_data,
     output wire dbg_doppler_valid,
     output wire [4:0] dbg_doppler_bin,
-    output wire [`RP_RANGE_BIN_BITS-1:0] dbg_range_bin,
+    output wire [`RP_RANGE_BIN_WIDTH_MAX-1:0] dbg_range_bin,
     
     // System status
     output wire [3:0] system_status,
@@ -181,7 +181,7 @@ wire tx_current_chirp_sync_valid;
 wire [31:0] rx_doppler_output;
 wire rx_doppler_valid;
 wire [4:0] rx_doppler_bin;
-wire [`RP_RANGE_BIN_BITS-1:0] rx_range_bin;
+wire [`RP_RANGE_BIN_WIDTH_MAX-1:0] rx_range_bin;
 wire [31:0] rx_range_profile;
 wire rx_range_valid;
 wire [15:0] rx_range_profile_decimated;
@@ -629,7 +629,7 @@ assign dc_notch_active = (host_dc_notch_width != 3'd0) &&
 wire [31:0] notched_doppler_data  = dc_notch_active ? 32'd0 : rx_doppler_output;
 wire        notched_doppler_valid = rx_doppler_valid;
 wire [4:0]  notched_doppler_bin   = rx_doppler_bin;
-wire [`RP_RANGE_BIN_BITS-1:0]  notched_range_bin     = rx_range_bin;
+wire [`RP_RANGE_BIN_WIDTH_MAX-1:0]  notched_range_bin     = rx_range_bin;
 
 // ============================================================================
 // CFAR DETECTOR (replaces simple threshold detector)
@@ -640,7 +640,7 @@ wire [`RP_RANGE_BIN_BITS-1:0]  notched_range_bin     = rx_range_bin;
 
 wire cfar_detect_flag;
 wire cfar_detect_valid;
-wire [`RP_RANGE_BIN_BITS-1:0]  cfar_detect_range;
+wire [`RP_RANGE_BIN_WIDTH_MAX-1:0]  cfar_detect_range;
 wire [4:0]  cfar_detect_doppler;
 wire [16:0] cfar_detect_magnitude;
 wire [16:0] cfar_detect_threshold;

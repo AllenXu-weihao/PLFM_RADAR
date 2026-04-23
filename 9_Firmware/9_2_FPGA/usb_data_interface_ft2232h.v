@@ -88,9 +88,14 @@ module usb_data_interface_ft2232h (
     input wire cfar_valid,
 
     // New inputs for bulk frame protocol (clk domain)
-    input wire [`RP_RANGE_BIN_BITS-1:0] range_bin_in,   // 9-bit range bin index
-    input wire [4:0]                    doppler_bin_in,  // 5-bit doppler bin index
-    input wire                          frame_complete,  // 1-cycle pulse from radar_receiver_final edge detector
+    // [RX-D] Widened to RP_RANGE_BIN_WIDTH_MAX (9-bit on 50T, 12-bit on 200T)
+    // to match upstream pipeline. In 3 km mode only bins 0..511 are exercised
+    // and the frame wire protocol still emits 512×32=16384 cells. 20 km mode
+    // (4096 bins, 131072 cells) requires a wire-protocol extension before
+    // bins 512..4095 can be transported to the host.
+    input wire [`RP_RANGE_BIN_WIDTH_MAX-1:0] range_bin_in,
+    input wire [4:0]                         doppler_bin_in,  // 5-bit doppler bin index
+    input wire                               frame_complete,  // 1-cycle pulse from radar_receiver_final edge detector
 
     // FT2232H Physical Interface (245 Synchronous FIFO mode)
     inout wire [7:0] ft_data,       // 8-bit bidirectional data bus

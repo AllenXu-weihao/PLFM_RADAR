@@ -43,9 +43,9 @@ STATUS_HEADER_BYTE = 0xBB
 DATA_PACKET_SIZE = 11               # 1 + 4 + 2 + 2 + 1 + 1
 STATUS_PACKET_SIZE = 26              # 1 + 24 + 1
 
-NUM_RANGE_BINS = 64
+NUM_RANGE_BINS = 512
 NUM_DOPPLER_BINS = 32
-NUM_CELLS = NUM_RANGE_BINS * NUM_DOPPLER_BINS  # 2048
+NUM_CELLS = NUM_RANGE_BINS * NUM_DOPPLER_BINS  # 16384
 
 WATERFALL_DEPTH = 64
 
@@ -777,6 +777,13 @@ class RadarAcquisition(threading.Thread):
 
     def _ingest_sample(self, sample: dict):
         """Place sample into current frame and emit when complete."""
+        # [GUI-C2 FIX] Use FPGA frame_start bit as the authoritative sync token.
+        # If FPGA flags frame_start mid-stream (after a USB drop or any glitch),
+        # finalize whatever we have and re-align to bin (0, 0). Without this the
+        # count-only sync stays permanently misaligned after a single dropped byte.
+        if sample.get("frame_start", 0) and self._sample_idx > 0:
+            self._finalize_frame()  # resets _sample_idx to 0 and starts a new frame
+
         rbin = self._sample_idx // NUM_DOPPLER_BINS
         dbin = self._sample_idx % NUM_DOPPLER_BINS
 
@@ -788,12 +795,15 @@ class RadarAcquisition(threading.Thread):
             if sample.get("detection", 0):
                 self._frame.detections[rbin, dbin] = 1
                 self._frame.detection_count += 1
-            # Accumulate FPGA range profile data (matched-filter output)
-            # Each sample carries the range_i/range_q for this range bin.
-            # Accumulate magnitude across Doppler bins for the range profile.
-            ri = int(sample.get("range_i", 0))
-            rq = int(sample.get("range_q", 0))
-            self._frame.range_profile[rbin] += abs(ri) + abs(rq)
+            # [GUI-C4 FIX] FPGA emits the same range_i/range_q for all 32 Doppler
+            # bins of a given range bin (it's the matched-filter range output,
+            # repeated per Doppler cell). Accumulating across all 32 inflates
+            # the profile 32x. Capture once per range bin at the first Doppler
+            # cell instead.
+            if dbin == 0:
+                ri = int(sample.get("range_i", 0))
+                rq = int(sample.get("range_q", 0))
+                self._frame.range_profile[rbin] = abs(ri) + abs(rq)
 
         self._sample_idx += 1
 

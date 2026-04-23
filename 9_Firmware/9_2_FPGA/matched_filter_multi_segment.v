@@ -248,8 +248,13 @@ always @(posedge clk or negedge reset_n) begin
                     // Store in buffer via BRAM write port
                     buf_we <= 1;
                     buf_waddr <= buffer_write_ptr[10:0];
-                    buf_wdata_i <= ddc_i[17:2] + ddc_i[1];
-                    buf_wdata_q <= ddc_q[17:2] + ddc_q[1];
+                    // [RX-A FIX] ddc_i = {{2{gc_i[15]}}, gc_i} — top 2 bits are
+                    // sign-extension. The previous `ddc_i[17:2] + ddc_i[1]`
+                    // was a gratuitous /4 scaling (~12 dB dynamic-range loss).
+                    // fft_engine has INTERNAL_W=32 with saturating 16-bit output,
+                    // so full 16-bit input is safe (no bit-growth overflow risk).
+                    buf_wdata_i <= ddc_i[15:0];
+                    buf_wdata_q <= ddc_q[15:0];
                     
                     buffer_write_ptr <= buffer_write_ptr + 1;
                     chirp_samples_collected <= chirp_samples_collected + 1;
