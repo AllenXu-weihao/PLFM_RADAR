@@ -67,6 +67,7 @@ TESTS_STANDALONE := test_bug12_pa_cal_loop_inverted \
                     test_bug13_dac2_adc_buffer_mismatch \
                     test_bug16_runradar_shadows_globals \
                     test_mcu_a1_cooling_hysteresis \
+                    test_mcu_a7_emergency_persist \
                     test_gap3_iwdg_config \
                     test_gap3_temperature_max \
                     test_gap3_idq_periodic_reread \
@@ -161,6 +162,9 @@ test_bug16_runradar_shadows_globals: test_bug16_runradar_shadows_globals.c
 	$(CC) $(CFLAGS) $< -o $@
 
 test_mcu_a1_cooling_hysteresis: test_mcu_a1_cooling_hysteresis.c
+	$(CC) $(CFLAGS) $< -o $@
+
+test_mcu_a7_emergency_persist: test_mcu_a7_emergency_persist.c
 	$(CC) $(CFLAGS) $< -o $@
 
 # Gap-3 safety tests -- mock-only (needs spy log for GPIO sequence)

@@ -838,10 +838,43 @@ void attemptErrorRecovery(SystemError_t error) {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
+// MCU-A7: persistent emergency-state flag in BKPSRAM
+//
+// Survives any MCU reset (incl. IWDG, NVIC SYSRESETREQ, brown-out) but is
+// lost on full power removal — exactly the recovery semantics we want for
+// emergency stop: power-cycle to clear, every other reset path keeps the
+// PAs disabled. Written once in Emergency_Stop and checked very early in
+// main(), before any PA enable code runs.
+////////////////////////////////////////////////////////////////////////////////
+#define EMERGENCY_PERSIST_MAGIC   0xDEAD5A5AU
+#define EMERGENCY_PERSIST_ADDR    ((volatile uint32_t *)BKPSRAM_BASE)
+
+static void emergency_persist_init_clocks(void) {
+    __HAL_RCC_PWR_CLK_ENABLE();
+    HAL_PWR_EnableBkUpAccess();
+    __HAL_RCC_BKPSRAM_CLK_ENABLE();
+}
+
+static void emergency_persist_set(void) {
+    emergency_persist_init_clocks();
+    *EMERGENCY_PERSIST_ADDR = EMERGENCY_PERSIST_MAGIC;
+}
+
+static bool emergency_persist_check(void) {
+    emergency_persist_init_clocks();
+    return *EMERGENCY_PERSIST_ADDR == EMERGENCY_PERSIST_MAGIC;
+}
+
+////////////////////////////////////////////////////////////////////////////////
 //:::::RF POWER AMPLIFIER DAC5578 Emergency stop function using CLR pin/////////
 ////////////////////////////////////////////////////////////////////////////////
 void Emergency_Stop(void) {
     DIAG_ERR("PA", ">>> EMERGENCY_STOP ACTIVATED <<<");
+    /* MCU-A7: persist emergency state in BKPSRAM BEFORE the rail-cut sequence
+     * so even if a stuck interrupt or bus fault prevents the cuts from
+     * completing, the next reset boots straight into safe-hold rather than
+     * re-running startup (which would re-energize the PAs). */
+    emergency_persist_set();
     /* Immediately clear all DAC outputs to zero using hardware CLR */
     DIAG_ERR("PA", "Clearing DAC1 outputs via CLR pin");
     DAC5578_ActivateClearPin(&hdac1);
@@ -870,10 +903,12 @@ void Emergency_Stop(void) {
     DIAG_ERR("PA", "Disabling RFPA VDD (EN_DIS_RFPA_VDD LOW)");
     HAL_GPIO_WritePin(EN_DIS_RFPA_VDD_GPIO_Port, EN_DIS_RFPA_VDD_Pin, GPIO_PIN_RESET);
 
-    DIAG_ERR("PA", "All PA rails cut -- entering infinite hold loop (manual reset required)");
-    /* Keep outputs cleared until reset.
-     * MUST refresh IWDG here — otherwise the watchdog would reset the MCU,
-     * re-running startup code which re-energizes PA rails. */
+    DIAG_ERR("PA", "All PA rails cut -- entering infinite hold loop (power-cycle to clear)");
+    /* MCU-A7: refresh IWDG in the healthy hold loop so a deliberate
+     * Emergency_Stop does not cycle the MCU pointlessly. If the loop itself
+     * hangs (stack corruption, bus fault), refresh stops, IWDG fires, and
+     * the BKPSRAM persist flag set above routes the reset back into safe-
+     * hold without re-enabling the PAs. */
     while (1) {
         HAL_IWDG_Refresh(&hiwdg);
         HAL_Delay(100);
@@ -1438,6 +1473,18 @@ int main(void)
   MX_USART3_UART_Init();
   MX_USB_DEVICE_Init();
   MX_IWDG_Init();  /* GAP-3 FIX 2: start hardware watchdog (~4 s timeout) */
+
+  /* MCU-A7: check BKPSRAM emergency-persist flag BEFORE any PA enable code
+   * runs. MX_GPIO_Init above has already forced EN_P_5V0_PA1/2/3,
+   * EN_P_5V5_PA, and EN_DIS_RFPA_VDD LOW (line 2783); calling Emergency_Stop
+   * here re-asserts that, sets the BKPSRAM flag (idempotent), and enters
+   * the hold loop. The only way out is removing main power — IWDG-/SYSRESET-
+   * driven boots all see the flag and stay in safe-hold. */
+  if (emergency_persist_check()) {
+      DIAG_ERR("SYS", "BKPSRAM emergency flag SET on boot -- entering safe-hold (power-cycle to clear)");
+      Emergency_Stop();  /* NOTREACHED */
+  }
+
   /* USER CODE BEGIN 2 */
 
   HAL_TIM_Base_Start(&htim1);
