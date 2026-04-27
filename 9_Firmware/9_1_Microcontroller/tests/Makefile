@@ -65,6 +65,7 @@ TESTS_MOCK_ONLY := test_bug2_ad9523_double_setup \
 # Tests that are standalone (no mocks needed, pure logic)
 TESTS_STANDALONE := test_bug12_pa_cal_loop_inverted \
                     test_bug13_dac2_adc_buffer_mismatch \
+                    test_bug16_runradar_shadows_globals \
                     test_gap3_iwdg_config \
                     test_gap3_temperature_max \
                     test_gap3_idq_periodic_reread \
@@ -154,6 +155,9 @@ test_bug12_pa_cal_loop_inverted: test_bug12_pa_cal_loop_inverted.c
 
 test_bug13_dac2_adc_buffer_mismatch: test_bug13_dac2_adc_buffer_mismatch.c
 	$(CC) $(CFLAGS) $< -lm -o $@
+
+test_bug16_runradar_shadows_globals: test_bug16_runradar_shadows_globals.c
+	$(CC) $(CFLAGS) $< -o $@
 
 # Gap-3 safety tests -- mock-only (needs spy log for GPIO sequence)
 test_gap3_emergency_stop_rails: test_gap3_emergency_stop_rails.c $(MOCK_OBJS)

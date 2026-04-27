@@ -526,9 +526,10 @@ void runRadarPulseSequence() {
     // adar_tr_x), not MCU-driven. setFastSwitchMode(true) call removed.
     DIAG("BF", "Beam sweep start (FPGA owns per-chirp T/R switching)");
 
-    int m = 1; // Chirp counter
-    int n = 1; // Beam Elevation position counter
-    int y = 1; // Beam Azimuth counter
+    // MCU-N5/C4: do NOT redeclare m/n/y here — they are file-scope globals
+    // (see lines ~190-192) that getStatusString() emits to the GUI as
+    // BeamPos/Azimuth/ChirpCount. Local declarations would shadow them and
+    // freeze the telemetry at 1.
 
     // Main beam steering sequence
     for(int beam_pos = 0; beam_pos < 15; beam_pos++) {
