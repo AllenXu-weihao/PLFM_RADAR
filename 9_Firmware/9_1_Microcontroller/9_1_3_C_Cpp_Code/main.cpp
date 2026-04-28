@@ -953,6 +953,34 @@ void set_mag_declination_deg(float deg) {
     Mag_Declination = deg;  /* keep legacy global in sync for any external readers */
 }
 
+////////////////////////////////////////////////////////////////////////////////
+// MCU-A4: warm-restart flag for the OCXO 180 s warmup loop
+//
+// BKPSRAM survives any MCU reset (IWDG, SYSRESETREQ, brown-out) but is
+// cleared by main-power removal. The OCXO oven keeps the crystal hot for
+// at least the few seconds an MCU-only reset takes, so a warm-restart
+// boot does not need the full 180 s frequency-settling soak. Power-cycle
+// always forces the full warmup again, which is the safe default.
+//
+// Slot layout (BKPSRAM, 4-byte words):
+//   [0] MCU-A7 emergency-state magic
+//   [1] MCU-A2 mag-declination magic
+//   [2] MCU-A2 mag-declination value
+//   [3] MCU-A4 warmup-complete magic
+////////////////////////////////////////////////////////////////////////////////
+#define WARMUP_PERSIST_MAGIC      0xCA1C1F1EU
+#define WARMUP_PERSIST_ADDR       ((volatile uint32_t *)(BKPSRAM_BASE + 12))
+
+void warmup_persist_set(void) {
+    emergency_persist_init_clocks();
+    *WARMUP_PERSIST_ADDR = WARMUP_PERSIST_MAGIC;
+}
+
+bool warmup_persist_check(void) {
+    emergency_persist_init_clocks();
+    return *WARMUP_PERSIST_ADDR == WARMUP_PERSIST_MAGIC;
+}
+
 float get_mag_declination_deg(void) {
     emergency_persist_init_clocks();
     if (*MAG_DECL_MAGIC_ADDR == MAG_DECL_PERSIST_MAGIC) {
@@ -1597,14 +1625,29 @@ int main(void)
   DIAG("SYS", "DWT cycle counter initialized, TIM1 started");
   DIAG("SYS", "HAL tick at init start: %lu ms", (unsigned long)HAL_GetTick());
 
-  //Wait for OCXO 3mn
-  DIAG("CLK", "OCXO warmup starting -- waiting 180 s (3 min)");
+  /* MCU-A4: skip the full 180 s OCXO warmup on warm restart. BKPSRAM
+   * survives MCU-only resets (IWDG, SYSRESETREQ, brown-out) so the warmup
+   * flag from the previous boot tells us the OCXO oven is still hot and
+   * the crystal frequency is already settled. Power-cycle clears BKPSRAM
+   * and we fall through to the full warmup, which is the safe default. */
   uint32_t ocxo_start = HAL_GetTick();
-  /* [GAP-3 FIX 2] Cannot use HAL_Delay(180000) — IWDG would reset MCU.
-   * Instead loop in 1-second steps, kicking the watchdog each iteration. */
-  for (int ocxo_sec = 0; ocxo_sec < 180; ocxo_sec++) {
-      HAL_IWDG_Refresh(&hiwdg);
-      HAL_Delay(1000);
+  if (warmup_persist_check()) {
+      DIAG("CLK", "OCXO warm-restart detected -- skipping full warmup, 5 s settle only");
+      /* [GAP-3 FIX 2] Cannot use HAL_Delay(5000) — IWDG would reset MCU.
+       * Loop in 1-second steps so the watchdog stays kicked. */
+      for (int s = 0; s < 5; s++) {
+          HAL_IWDG_Refresh(&hiwdg);
+          HAL_Delay(1000);
+      }
+  } else {
+      DIAG("CLK", "OCXO cold start -- waiting full 180 s warmup (3 min)");
+      /* [GAP-3 FIX 2] Cannot use HAL_Delay(180000) — IWDG would reset MCU.
+       * Loop in 1-second steps, kicking the watchdog each iteration. */
+      for (int ocxo_sec = 0; ocxo_sec < 180; ocxo_sec++) {
+          HAL_IWDG_Refresh(&hiwdg);
+          HAL_Delay(1000);
+      }
+      warmup_persist_set();  /* arm warm-restart bypass for any future reset */
   }
   DIAG_ELAPSED("CLK", "OCXO warmup", ocxo_start);
 

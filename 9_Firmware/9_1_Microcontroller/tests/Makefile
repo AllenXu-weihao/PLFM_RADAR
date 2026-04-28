@@ -71,6 +71,7 @@ TESTS_STANDALONE := test_bug12_pa_cal_loop_inverted \
                     test_mcu_a5_pa_cal_gate \
                     test_mcu_a6_recovery_dispatch \
                     test_mcu_a2_mag_declination \
+                    test_mcu_a4_ocxo_warm_restart \
                     test_gap3_iwdg_config \
                     test_gap3_temperature_max \
                     test_gap3_idq_periodic_reread \
@@ -178,6 +179,9 @@ test_mcu_a6_recovery_dispatch: test_mcu_a6_recovery_dispatch.c
 
 test_mcu_a2_mag_declination: test_mcu_a2_mag_declination.c
 	$(CC) $(CFLAGS) $< -lm -o $@
+
+test_mcu_a4_ocxo_warm_restart: test_mcu_a4_ocxo_warm_restart.c
+	$(CC) $(CFLAGS) $< -o $@
 
 # Gap-3 safety tests -- mock-only (needs spy log for GPIO sequence)
 test_gap3_emergency_stop_rails: test_gap3_emergency_stop_rails.c $(MOCK_OBJS)
