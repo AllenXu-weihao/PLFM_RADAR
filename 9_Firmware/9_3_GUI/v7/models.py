@@ -105,8 +105,11 @@ class RadarSettings:
     tab and Opcode enum in radar_protocol.py.  This dataclass holds only
     host-side display/map settings and physical-unit conversion factors.
 
-    range_resolution and velocity_resolution should be calibrated to
-    the actual waveform parameters.
+    range_resolution and velocity_resolution below are placeholders. Live
+    operation derives the actual values from WaveformConfig in
+    workers.py:RadarDataWorker (see GUI-C3 fix); these literals are only
+    consulted by code paths that have not yet been migrated, and should
+    not be relied on for physics-accurate display.
     """
     system_frequency: float = 10.5e9    # Hz (carrier, used for velocity calc)
     range_resolution: float = 6.0        # Meters per range bin (c/(2*Fs)*decim = 1.5*4)

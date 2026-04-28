@@ -64,7 +64,6 @@ set rtl_files [list \
     "${rtl_dir}/edge_detector.v" \
     "${rtl_dir}/fir_lowpass.v" \
     "${rtl_dir}/frequency_matched_filter.v" \
-    "${rtl_dir}/latency_buffer.v" \
     "${rtl_dir}/matched_filter_multi_segment.v" \
     "${rtl_dir}/matched_filter_processing_chain.v" \
     "${rtl_dir}/nco_400m_enhanced.v" \

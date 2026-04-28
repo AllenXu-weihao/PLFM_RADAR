@@ -280,11 +280,16 @@ always @(posedge clk_120m or negedge reset_n) begin
                 chirp_data <= 8'd128;
             end
             
+            // chirp_valid policy (LONG_CHIRP + SHORT_CHIRP states): assert
+            // chirp_valid HIGH for the entire active-sample window of each
+            // chirp (sample_counter < T?_SAMPLES) so the downstream DAC sees a
+            // continuous data-valid pulse, then ride out the remaining state
+            // duration on idle code 8'd128. Without the per-cycle assert,
+            // downstream FIFOs underrun on the trailing samples of each chirp.
             LONG_CHIRP: begin
                 rf_switch_ctrl <= 1'b1;
                 {adar_tr_1, adar_tr_2, adar_tr_3, adar_tr_4} <= 4'b1111;
-                
-                // CRITICAL FIX: Generate valid signal
+
                 if (sample_counter < T1_SAMPLES) begin
                     chirp_data <= long_chirp_rd_data;
                     chirp_valid <= 1'b1;  // Valid during entire chirp
@@ -306,8 +311,8 @@ always @(posedge clk_120m or negedge reset_n) begin
             SHORT_CHIRP: begin
                 rf_switch_ctrl <= 1'b1;
                 {adar_tr_1, adar_tr_2, adar_tr_3, adar_tr_4} <= 4'b1111;
-                
-                // CRITICAL FIX: Generate valid signal for short chirp
+
+                /* see chirp_valid policy block above LONG_CHIRP */
                 if (sample_counter < T2_SAMPLES) begin
                     chirp_data <= short_chirp_lut[sample_counter];
                     chirp_valid <= 1'b1;  // Valid during entire chirp

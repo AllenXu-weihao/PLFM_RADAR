@@ -62,7 +62,6 @@ PROD_RTL=(
     fir_lowpass.v
     ddc_input_interface.v
     chirp_memory_loader_param.v
-    latency_buffer.v
     matched_filter_multi_segment.v
     matched_filter_processing_chain.v
     range_bin_decimator.v
@@ -101,7 +100,7 @@ RECEIVER_RTL=(
     tb/ad9484_interface_400m_stub.v
     ddc_400m.v nco_400m_enhanced.v cic_decimator_4x_enhanced.v
     cdc_modules.v fir_lowpass.v ddc_input_interface.v
-    chirp_memory_loader_param.v latency_buffer.v
+    chirp_memory_loader_param.v
     matched_filter_multi_segment.v matched_filter_processing_chain.v
     range_bin_decimator.v doppler_processor.v xfft_16.v fft_engine.v
     xfft_2048.v fft_engine_axi_bridge.v

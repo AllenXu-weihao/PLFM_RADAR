@@ -7,7 +7,6 @@ Checks:
   2. FFT twiddle files: bit-exact match against cos(2*pi*k/N) in Q15
   3. Long chirp .mem files: reverse-engineer parameters, check for chirp structure
   4. Short chirp .mem files: check length, value range, spectral content
-   5. latency_buffer LATENCY=3187 parameter validation
 
 Usage:
     python3 validate_mem_files.py
@@ -379,81 +378,6 @@ def test_chirp_vs_model():
 
 
 # ============================================================================
-# TEST 6: Latency Buffer LATENCY=3187 Validation
-# ============================================================================
-def test_latency_buffer():
-
-    # The latency buffer delays the reference chirp data to align with
-    # the matched filter processing chain output.
-    #
-    # The total latency through the processing chain depends on the branch:
-    #
-    # SYNTHESIS branch (fft_engine.v):
-    #   - Load: 1024 cycles (input)
-    #   - Forward FFT: LOG2N=10 stages x N/2=512 butterflies x 5-cycle pipeline = variable
-    #   - Reference FFT: same
-    #   - Conjugate multiply: 1024 cycles (4-stage pipeline in frequency_matched_filter)
-    #   - Inverse FFT: same as forward
-    #   - Output: 1024 cycles
-    #   Total: roughly 3000-4000 cycles depending on pipeline fill
-    #
-    # The LATENCY=3187 value was likely determined empirically to align
-    # the reference chirp arriving at the processing chain with the
-    # correct time-domain position.
-    #
-    # Key constraint: LATENCY must be < 4096 (BRAM buffer size)
-    LATENCY = 3187
-    BRAM_SIZE = 4096
-
-    check(LATENCY < BRAM_SIZE,
-          f"LATENCY ({LATENCY}) < BRAM size ({BRAM_SIZE})")
-
-    # The fft_engine processes in stages:
-    # - LOAD: 1024 clocks (accepts input)
-    # - Per butterfly stage: 512 butterflies x 5 pipeline stages = ~2560 clocks + overhead
-    #   Actually: 512 butterflies, each takes 5 cycles = 2560 per stage, 10 stages
-    #   Total compute: 10 * 2560 = 25600 clocks
-    # But this is just for ONE FFT. The chain does 3 FFTs + multiply.
-    #
-    # For the SIMULATION branch, it's 1 clock per operation (behavioral).
-    # LATENCY=3187 doesn't apply to simulation branch behavior —
-    # it's the physical hardware pipeline latency.
-    #
-    # For synthesis: the latency_buffer feeds ref data to the chain via
-    # chirp_memory_loader_param → latency_buffer → chain.
-    # But wait — looking at radar_receiver_final.v:
-    #   - mem_request drives valid_in on the latency buffer
-    #   - The buffer delays {ref_i, ref_q} by LATENCY valid_in cycles
-    #   - The delayed output feeds long_chirp_real/imag → chain
-    #
-    # The purpose: the chain in the SYNTHESIS branch reads reference data
-    # via the long_chirp_real/imag ports DURING ST_FWD_FFT (while collecting
-    # input samples). The reference data needs to arrive LATENCY cycles
-    # after the first mem_request, where LATENCY accounts for:
-    #   - The fft_engine pipeline latency from input to output
-    #   - Specifically, the chain processes: load 1024 → FFT → FFT → multiply → IFFT → output
-    #     The reference is consumed during the second FFT (ST_REF_BITREV/BUTTERFLY)
-    #     which starts after the first FFT completes.
-
-    # For now, validate that LATENCY is reasonable (between 1000 and 4095)
-    check(1000 < LATENCY < 4095,
-          f"LATENCY={LATENCY} in reasonable range [1000, 4095]")
-
-    # Check that the module name vs parameter is consistent
-    # Module name was renamed from latency_buffer_2159 to latency_buffer
-    # to match the actual parameterized LATENCY value. No warning needed.
-
-    # Validate address arithmetic won't overflow
-    min_read_ptr = 4096 + 0 - LATENCY
-    check(min_read_ptr >= 0 and min_read_ptr < 4096,
-          f"Min read_ptr after wrap = {min_read_ptr} (valid: 0..4095)")
-
-    # The latency buffer uses valid_in gated reads, so it only counts
-    # valid samples. The number of valid_in pulses between first write
-    # and first read is LATENCY.
-
-
-# ============================================================================
 # TEST 7: Cross-check chirp memory loader addressing
 # ============================================================================
 def test_memory_addressing():
@@ -553,7 +477,6 @@ def main():
     test_long_chirp()
     test_short_chirp()
     test_chirp_vs_model()
-    test_latency_buffer()
     test_memory_addressing()
     test_seg3_padding()
 
