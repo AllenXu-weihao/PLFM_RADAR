@@ -147,7 +147,14 @@ float M11=1.0,  M12=-0.0,  M13=0.0,
 float ax, ay, az, gx, gy, gz, mx, my, mz,mxc,myc,mzc; // variables to hold latest sensor data values
 float q[4] = {1.0f, 0.0f, 0.0f, 0.0f};    // vector to hold quaternion
 float temperature;
-float Mag_Declination = -0.61; //0°
+/* MCU-A2: site-specific magnetic declination. Was a hardcoded -0.61° literal
+ * baked in for one deployment location. Default kept for backward compatibility
+ * with existing sites; runtime override flows through set_mag_declination_deg()
+ * and persists across reset in BKPSRAM (slots 1+2 — slot 0 is the MCU-A7
+ * emergency flag). Reads via get_mag_declination_deg() at the use site. */
+#define MAG_DECLINATION_DEFAULT_DEG  (-0.61f)
+#define MAG_DECLINATION_LIMIT_DEG    (30.0f)
+float Mag_Declination = MAG_DECLINATION_DEFAULT_DEG;  /* legacy global, retained for any external linkage */
 
 float RxAcc,RyAcc,RzAcc;
 float Rate_Ayz_1,Rate_Axz_1,Rate_Axy_1;
@@ -917,6 +924,46 @@ static void emergency_persist_set(void) {
 static bool emergency_persist_check(void) {
     emergency_persist_init_clocks();
     return *EMERGENCY_PERSIST_ADDR == EMERGENCY_PERSIST_MAGIC;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+// MCU-A2: site-configurable magnetic declination, persisted in BKPSRAM
+//
+// Slot layout (BKPSRAM, 4-byte words):
+//   [0] MCU-A7 emergency-state magic
+//   [1] MCU-A2 mag-declination magic
+//   [2] MCU-A2 mag-declination value (float, bit-cast as uint32)
+//
+// Survives every reset path; cleared only on main-power removal. Range
+// clamped to ±30° before persisting (anything beyond that is a calibration
+// error rather than a legitimate site value — physical declination ranges
+// are roughly -25° to +25° worldwide).
+////////////////////////////////////////////////////////////////////////////////
+#define MAG_DECL_PERSIST_MAGIC    0xCAFEFACEU
+#define MAG_DECL_MAGIC_ADDR       ((volatile uint32_t *)(BKPSRAM_BASE + 4))
+#define MAG_DECL_VALUE_ADDR       ((volatile uint32_t *)(BKPSRAM_BASE + 8))
+
+void set_mag_declination_deg(float deg) {
+    if (deg >  MAG_DECLINATION_LIMIT_DEG) deg =  MAG_DECLINATION_LIMIT_DEG;
+    if (deg < -MAG_DECLINATION_LIMIT_DEG) deg = -MAG_DECLINATION_LIMIT_DEG;
+    emergency_persist_init_clocks();
+    union { float f; uint32_t u; } cvt = { .f = deg };
+    *MAG_DECL_VALUE_ADDR = cvt.u;
+    *MAG_DECL_MAGIC_ADDR = MAG_DECL_PERSIST_MAGIC;
+    Mag_Declination = deg;  /* keep legacy global in sync for any external readers */
+}
+
+float get_mag_declination_deg(void) {
+    emergency_persist_init_clocks();
+    if (*MAG_DECL_MAGIC_ADDR == MAG_DECL_PERSIST_MAGIC) {
+        union { float f; uint32_t u; } cvt = { .u = *MAG_DECL_VALUE_ADDR };
+        /* defensive clamp in case BKPSRAM was corrupted by VBAT brown-out */
+        float v = cvt.f;
+        if (v >  MAG_DECLINATION_LIMIT_DEG) v =  MAG_DECLINATION_LIMIT_DEG;
+        if (v < -MAG_DECLINATION_LIMIT_DEG) v = -MAG_DECLINATION_LIMIT_DEG;
+        return v;
+    }
+    return MAG_DECLINATION_DEFAULT_DEG;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -1724,7 +1771,7 @@ int main(void)
 
     float magRawX = mx*cos(Pitch_Sensor*PI/180.0f)  - mz*sin(Pitch_Sensor*PI/180.0f);
 	float magRawY = mx*sin(Roll_Sensor*PI/180.0f)*sin(Pitch_Sensor*PI/180.0f) + my*cos(Roll_Sensor*PI/180.0f)- mz*sin(Roll_Sensor*PI/180.0f)*cos(Pitch_Sensor*PI/180.0f);
-    Yaw_Sensor = (180*atan2(magRawY,magRawX)/PI) - Mag_Declination;
+    Yaw_Sensor = (180*atan2(magRawY,magRawX)/PI) - get_mag_declination_deg();  /* MCU-A2 */
 
     if(Yaw_Sensor<0)Yaw_Sensor+=360;
 
