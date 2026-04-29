@@ -422,9 +422,13 @@ run_test() {
     output=$(timeout "$timeout_secs" vvp "$vvp" 2>&1) || true
 
     # Count PASS/FAIL in output (testbenches use explicit [PASS]/[FAIL] markers)
+    # Match `[PASS]` and `[PASS <digits>]` (and same for FAIL). Excludes
+    # informational tags like `[FAIL-INFO]` (used for known unrelated bugs,
+    # e.g. RX-NEW-1 fft_engine bin-shift in tb_matched_filter_processing_chain.v)
+    # which would otherwise false-fire as real failures.
     local test_pass test_fail
-    test_pass=$(echo "$output" | grep -Ec '^\[PASS([^]]*)\]' || true)
-    test_fail=$(echo "$output" | grep -Ec '^\[FAIL([^]]*)\]' || true)
+    test_pass=$(echo "$output" | grep -Ec '^\[PASS( [0-9]+)?\]' || true)
+    test_fail=$(echo "$output" | grep -Ec '^\[FAIL( [0-9]+)?\]' || true)
 
     if [[ "$test_fail" -gt 0 ]]; then
         echo -e "${RED}FAIL${NC} (pass=$test_pass, fail=$test_fail)"
