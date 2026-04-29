@@ -24,10 +24,32 @@ Short chirp:
   T_SHORT_CHIRP and CHIRP_BW.
 
 Phase model (baseband, post-DDC):
-  phase(n) = pi * chirp_rate * t^2,  t = n / FS_SYS
+  phase(n) = 2*pi*F_BASEBAND_LOW*t + pi * chirp_rate * t^2,  t = n / FS_SYS
   chirp_rate = CHIRP_BW / T_chirp
+  F_BASEBAND_LOW = 10 MHz  (DAC chirp low-edge frequency)
 
-Scaling: 0.9 * 32767 (Q15), matching radar_scene.py generate_reference_chirp_q15()
+This produces a F_BASEBAND_LOW..(F_BASEBAND_LOW+CHIRP_BW) baseband upchirp.
+
+End-to-end frequency plan (TX-I, 2026-04-28):
+  DAC LUT  : 10..30 MHz @ fs_dac=120 MHz       (plfm_chirp_controller.v;
+                                                 Hilbert-confirmed for both
+                                                 long and short LUTs)
+  TX upmix : LO=10.500 GHz (adf4382a_manager.h:35), high-side
+             -> RF transmitted: 10.510..10.530 GHz
+  RX downmix: LO=10.380 GHz (adf4382a_manager.h:36), high-side
+              -> IF at ADC:    130..150 MHz
+  DDC NCO  : 120 MHz exactly (ddc_400m.v:201)
+             -> baseband:     10..30 MHz   <-- matched-filter reference
+
+Sideband orientation (high-side at both mixers) is the conventional choice
+and consistent with all design comments / antenna match (10.25..10.75 GHz);
+loopback capture would settle it definitively. If either mixer turns out to
+be low-side, the sign of F_BASEBAND_LOW flips and/or the chirp direction
+reverses; revisit before re-generating .mem files.
+
+radar_scene.py uses the same F_BASEBAND_LOW; both must stay in sync.
+
+Scaling: 0.9 * 32767 (Q15)
 
 Usage:
     python3 gen_chirp_mem.py
@@ -45,6 +67,13 @@ FS_SYS = 100e6            # System clock (100 MHz, post-CIC)
 T_LONG_CHIRP = 30e-6      # 30 us long chirp duration
 T_SHORT_CHIRP = 0.5e-6    # 0.5 us short chirp duration
 FFT_SIZE = 2048
+# DAC chirp baseband low-edge frequency. The TX LUT in plfm_chirp_controller.v
+# is a 10..30 MHz upchirp at fs_dac=120 MHz (Hilbert-confirmed for both long
+# and short LUTs). With TX_LO=10.500 GHz, RX_LO=10.380 GHz (adf4382a_manager.h)
+# and the 120 MHz DDC NCO (ddc_400m.v), high-side mixing places the post-DDC
+# echo at 10..30 MHz baseband, not 0..20 MHz. The matched-filter reference
+# must include this +10 MHz DC offset.
+F_BASEBAND_LOW = 10e6
 LONG_CHIRP_SAMPLES = int(T_LONG_CHIRP * FS_SYS)   # 3000
 SHORT_CHIRP_SAMPLES = int(T_SHORT_CHIRP * FS_SYS)  # 50
 LONG_SEGMENTS = 2
@@ -69,7 +98,7 @@ def generate_full_long_chirp():
 
     for n in range(LONG_CHIRP_SAMPLES):
         t = n / FS_SYS
-        phase = math.pi * chirp_rate * t * t
+        phase = 2 * math.pi * F_BASEBAND_LOW * t + math.pi * chirp_rate * t * t
         re_val = round(Q15_MAX * SCALE * math.cos(phase))
         im_val = round(Q15_MAX * SCALE * math.sin(phase))
         chirp_i.append(max(-32768, min(32767, re_val)))
@@ -92,7 +121,7 @@ def generate_short_chirp():
 
     for n in range(SHORT_CHIRP_SAMPLES):
         t = n / FS_SYS
-        phase = math.pi * chirp_rate * t * t
+        phase = 2 * math.pi * F_BASEBAND_LOW * t + math.pi * chirp_rate * t * t
         re_val = round(Q15_MAX * SCALE * math.cos(phase))
         im_val = round(Q15_MAX * SCALE * math.sin(phase))
         chirp_i.append(max(-32768, min(32767, re_val)))
@@ -155,13 +184,14 @@ def main():
 
     # ---- Verification summary ----
 
-    # Cross-check seg0 against radar_scene.py generate_reference_chirp_q15()
-    # That function generates exactly the first 1024 samples of the chirp
+    # Self-check: recompute the phase formula and verify the seg0 .mem matches.
+    # radar_scene.py.generate_reference_chirp_q15() uses the same phase form
+    # and the same F_BASEBAND_LOW; the two stay in sync by construction.
     chirp_rate = CHIRP_BW / T_LONG_CHIRP
     mismatches = 0
     for n in range(FFT_SIZE):
         t = n / FS_SYS
-        phase = math.pi * chirp_rate * t * t
+        phase = 2 * math.pi * F_BASEBAND_LOW * t + math.pi * chirp_rate * t * t
         expected_i = max(-32768, min(32767, round(Q15_MAX * SCALE * math.cos(phase))))
         expected_q = max(-32768, min(32767, round(Q15_MAX * SCALE * math.sin(phase))))
         if long_i[n] != expected_i or long_q[n] != expected_q:

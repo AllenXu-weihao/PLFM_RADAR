@@ -32,11 +32,23 @@ F_CARRIER = 10.5e9        # 10.5 GHz carrier
 C_LIGHT = 3.0e8           # Speed of light (m/s)
 WAVELENGTH = C_LIGHT / F_CARRIER  # ~0.02857 m
 
-# Chirp parameters
-F_IF = 120e6              # IF frequency (120 MHz)
-CHIRP_BW = 20e6           # Chirp bandwidth (30 MHz -> 10 MHz = 20 MHz sweep)
-F_CHIRP_START = 30e6      # Chirp start frequency (relative to IF)
-F_CHIRP_END = 10e6        # Chirp end frequency (relative to IF)
+# Chirp parameters.
+#
+# End-to-end frequency plan (TX-I, 2026-04-28):
+#   DAC LUT  : 10..30 MHz @ fs_dac=120 MHz (plfm_chirp_controller.v;
+#                                            Hilbert-confirmed for both
+#                                            long and short LUTs)
+#   TX upmix : LO=10.500 GHz (adf4382a_manager.h:35), high-side
+#              -> RF transmitted: 10.510..10.530 GHz
+#   RX downmix: LO=10.380 GHz (adf4382a_manager.h:36), high-side
+#               -> IF at ADC:    130..150 MHz
+#   DDC NCO  : 120 MHz exactly (ddc_400m.v:201)
+#              -> baseband:     10..30 MHz
+F_IF = 120e6              # DDC NCO frequency (120 MHz)
+F_BASEBAND_LOW = 10e6     # DAC chirp baseband low-edge frequency
+CHIRP_BW = 20e6           # Chirp bandwidth (10 MHz -> 30 MHz upchirp = 20 MHz sweep)
+F_CHIRP_START = F_BASEBAND_LOW                  # 10 MHz at DAC baseband
+F_CHIRP_END   = F_BASEBAND_LOW + CHIRP_BW       # 30 MHz at DAC baseband
 
 # Sampling
 FS_ADC = 400e6            # ADC sample rate (400 MSPS)
@@ -153,12 +165,13 @@ def generate_if_chirp(n_samples, chirp_bw=CHIRP_BW, f_if=F_IF, fs=FS_ADC):
     chirp_q = []
     chirp_rate = chirp_bw / (n_samples / fs)  # Hz/s
 
+    # IF chirp starts at f_if + F_BASEBAND_LOW and sweeps up over chirp_bw,
+    # i.e. 130..150 MHz for the nominal high-side / 120 MHz NCO chain.
+    f_lo = f_if + F_BASEBAND_LOW
     for n in range(n_samples):
         t = n / fs
-        # Instantaneous frequency: f_if - chirp_bw/2 + chirp_rate * t
-        # Phase: integral of 2*pi*f(t)*dt
-        _f_inst = f_if - chirp_bw / 2 + chirp_rate * t
-        phase = 2 * math.pi * (f_if - chirp_bw / 2) * t + math.pi * chirp_rate * t * t
+        _f_inst = f_lo + chirp_rate * t
+        phase = 2 * math.pi * f_lo * t + math.pi * chirp_rate * t * t
         chirp_i.append(math.cos(phase))
         chirp_q.append(math.sin(phase))
 
@@ -188,10 +201,10 @@ def generate_reference_chirp_q15(n_fft=FFT_SIZE, chirp_bw=CHIRP_BW, _f_if=F_IF, 
 
     for n in range(chirp_samples):
         t = n / FS_SYS
-        # After DDC, the chirp is at baseband
-        # The beat frequency from a target at delay tau is: f_beat = chirp_rate * tau
-        # Reference chirp is the TX chirp at baseband (zero delay)
-        phase = math.pi * chirp_rate * t * t
+        # After DDC, the chirp is at baseband F_BASEBAND_LOW..(F_BASEBAND_LOW+BW),
+        # i.e. 10..30 MHz for the nominal chain. Reference chirp is the TX chirp
+        # at baseband (zero delay). Phase formula must match gen_chirp_mem.py.
+        phase = 2 * math.pi * F_BASEBAND_LOW * t + math.pi * chirp_rate * t * t
         re_val = round(32767 * 0.9 * math.cos(phase))
         im_val = round(32767 * 0.9 * math.sin(phase))
         ref_re[n] = max(-32768, min(32767, re_val))
@@ -263,8 +276,10 @@ def generate_adc_samples(targets, n_samples, noise_stddev=3.0,
             t = n / FS_ADC
             t_delayed = n_delayed / FS_ADC
 
-            # Signal at IF: cos(2*pi*f_if*t + pi*chirp_rate*t_delayed^2 + doppler + phase)
-            phase = (2 * math.pi * F_IF * t
+            # Signal at IF: chirp starts at (F_IF + F_BASEBAND_LOW) and sweeps
+            # up by chirp_rate (130..150 MHz for the nominal chain).
+            f_lo_if = F_IF + F_BASEBAND_LOW
+            phase = (2 * math.pi * f_lo_if * t
                      + math.pi * chirp_rate * t_delayed * t_delayed
                      + 2 * math.pi * doppler_hz * t
                      + phase0)

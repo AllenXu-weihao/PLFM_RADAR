@@ -115,8 +115,21 @@ always @(posedge clk_120m) begin
 end
 
 // Short PLFM chirp LUT initialization (too small for BRAM, keep inline)
+//
+// TX-I (analyzed 2026-04-28; tb/cosim/analyze_short_chirp_mismatch.py):
+//   60 samples @ fs_dac=120 MHz over 0.5 us, real-valued passband.
+//   Hilbert analysis confirms an UPCHIRP from ~10 to ~30 MHz baseband
+//   (BW ~19.4 MHz). The old comment "30MHz to 10MHz" had the sweep
+//   direction reversed and is corrected below.
+//
+// End-to-end frequency plan (from adf4382a_manager.h + ddc_400m.v):
+//   TX upmix:  LO=10.500 GHz, high-side -> RF:  10.510..10.530 GHz
+//   RX downmix: LO=10.380 GHz, high-side -> IF:  130..150 MHz
+//   DDC NCO:   120 MHz exactly             -> baseband: 10..30 MHz
+// The matched-filter reference in tb/cosim/gen_chirp_mem.py was updated
+// to include the +10 MHz baseband offset to match this band.
 initial begin
-    // Complete Short PLFM chirp LUT (0.5us, 30MHz to 10MHz)
+    // Complete Short PLFM chirp LUT (0.5us, ~10MHz to ~30MHz upchirp)
     short_chirp_lut[ 0] = 8'd255; short_chirp_lut[ 1] = 8'd237; short_chirp_lut[ 2] = 8'd187; short_chirp_lut[ 3] = 8'd118; short_chirp_lut[ 4] = 8'd 49; short_chirp_lut[ 5] = 8'd  6; short_chirp_lut[ 6] = 8'd  7; short_chirp_lut[ 7] = 8'd 54; 
     short_chirp_lut[ 8] = 8'd132; short_chirp_lut[ 9] = 8'd210; short_chirp_lut[10] = 8'd253; short_chirp_lut[11] = 8'd237; short_chirp_lut[12] = 8'd167; short_chirp_lut[13] = 8'd 75; short_chirp_lut[14] = 8'd 10; short_chirp_lut[15] = 8'd 10; 
     short_chirp_lut[16] = 8'd 80; short_chirp_lut[17] = 8'd180; short_chirp_lut[18] = 8'd248; short_chirp_lut[19] = 8'd237; short_chirp_lut[20] = 8'd150; short_chirp_lut[21] = 8'd 45; short_chirp_lut[22] = 8'd  1; short_chirp_lut[23] = 8'd 54; 
