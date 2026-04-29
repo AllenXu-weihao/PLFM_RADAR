@@ -143,7 +143,10 @@ usb_data_interface usb_inst (
     .status_agc_current_gain(4'd0),
     .status_agc_peak_magnitude(8'd0),
     .status_agc_saturation_count(8'd0),
-    .status_agc_enable(1'b0)
+    .status_agc_enable(1'b0),
+    // AUDIT-S10: control-fault flags tied off on dev board (no DDC/decimator)
+    .status_range_decim_watchdog(1'b0),
+    .status_ddc_cic_fir_overrun(1'b0)
 );
 
 endmodule

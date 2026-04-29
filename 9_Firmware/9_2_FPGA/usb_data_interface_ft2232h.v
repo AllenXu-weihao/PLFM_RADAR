@@ -163,7 +163,14 @@ module usb_data_interface_ft2232h (
     input wire [3:0]  status_agc_current_gain,
     input wire [7:0]  status_agc_peak_magnitude,
     input wire [7:0]  status_agc_saturation_count,
-    input wire        status_agc_enable
+    input wire        status_agc_enable,
+
+    // AUDIT-S10: control-fault flags (clk domain). Exposed in status_words[5]
+    // [6:5] so host-side telemetry can graph each fault class independently
+    // of the gpio_dig7 split. 2-stage level CDC into ft_clk; sticky/slow-
+    // changing source so 2-FF sync is sufficient.
+    input wire        status_range_decim_watchdog,  // audit F-6.4
+    input wire        status_ddc_cic_fir_overrun    // audit F-1.2
 );
 
 // ============================================================================
@@ -594,6 +601,13 @@ wire status_req_ft  = status_toggle_sync[2] ^ status_toggle_prev;
 (* ASYNC_REG = "TRUE" *) reg [6:0] frame_drop_sync_0;
 reg [6:0]                          frame_drop_sync_1;
 
+// --- AUDIT-S10: control-fault flag CDC (clk → ft_clk, 2-stage level sync) ---
+// Sticky/slow-changing in source domain so 2-FF sync is sufficient.
+(* ASYNC_REG = "TRUE" *) reg range_decim_watchdog_sync_0;
+reg                          range_decim_watchdog_sync_1;
+(* ASYNC_REG = "TRUE" *) reg ddc_cic_fir_overrun_sync_0;
+reg                          ddc_cic_fir_overrun_sync_1;
+
 wire stream_range_en   = stream_ctrl_sync_1[0];
 wire stream_doppler_en = stream_ctrl_sync_1[1];
 wire stream_cfar_en    = stream_ctrl_sync_1[2];
@@ -708,6 +722,11 @@ always @(posedge ft_clk or negedge ft_effective_reset_n) begin
         stream_ctrl_sync_1 <= `RP_STREAM_CTRL_DEFAULT;
         frame_drop_sync_0  <= 7'd0;
         frame_drop_sync_1  <= 7'd0;
+        // AUDIT-S10: control-fault flag CDC reset
+        range_decim_watchdog_sync_0 <= 1'b0;
+        range_decim_watchdog_sync_1 <= 1'b0;
+        ddc_cic_fir_overrun_sync_0  <= 1'b0;
+        ddc_cic_fir_overrun_sync_1  <= 1'b0;
         for (si = 0; si < 6; si = si + 1)
             status_words[si] <= 32'd0;
         wr_state       <= WR_IDLE;
@@ -752,6 +771,12 @@ always @(posedge ft_clk or negedge ft_effective_reset_n) begin
         frame_drop_sync_0 <= frame_drop_count;
         frame_drop_sync_1 <= frame_drop_sync_0;
 
+        // AUDIT-S10: control-fault flag CDC (clk → ft_clk for status read)
+        range_decim_watchdog_sync_0 <= status_range_decim_watchdog;
+        range_decim_watchdog_sync_1 <= range_decim_watchdog_sync_0;
+        ddc_cic_fir_overrun_sync_0  <= status_ddc_cic_fir_overrun;
+        ddc_cic_fir_overrun_sync_1  <= ddc_cic_fir_overrun_sync_0;
+
         // Status snapshot on request
         if (status_req_ft) begin
             // Word 0: {0xFF, mode[1:0], stream[5:0], threshold[15:0]}
@@ -768,13 +793,19 @@ always @(posedge ft_clk or negedge ft_effective_reset_n) begin
                                 status_chirps_mismatch,         // [10] TX-G mismatch flag
                                 8'd0,                           // [9:2] reserved
                                 status_range_mode};             // [1:0]
-            // AUDIT-C12: frame_drop_count exposed at status_words[5][31:25]
-            // (was 7'd0 reserved). Saturates at 127. Counts frame_complete
-            // events that arrived while previous frame was still in WR_FSM
-            // transit (silent frame drop indicator for host visibility).
+            // Word 5: {frame_drop_count[31:25], self_test_busy[24],
+            //          reserved[23:16], self_test_detail[15:8], reserved[7],
+            //          cic_fir_overrun[6], range_decim_watchdog[5],
+            //          self_test_flags[4:0]}
+            // AUDIT-C12: bits [31:25] = frame_drop_count (silent frame drops).
+            // AUDIT-S10: bits [6:5] expose control-fault classes that route to
+            // gpio_dig7 — gives host visibility regardless of MCU consumption.
             status_words[5] <= {frame_drop_sync_1, status_self_test_busy,
                                 8'd0, status_self_test_detail,
-                                3'd0, status_self_test_flags};
+                                1'd0,                          // [7] reserved
+                                ddc_cic_fir_overrun_sync_1,    // [6] audit F-1.2
+                                range_decim_watchdog_sync_1,   // [5] audit F-6.4
+                                status_self_test_flags};       // [4:0]
         end
 
         // ================================================================

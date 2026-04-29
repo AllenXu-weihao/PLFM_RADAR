@@ -562,6 +562,10 @@ run_test "ADC PWDN opcode 0x32 (AUDIT-S25)" \
     tb/tb_adc_pwdn_opcode.vvp \
     tb/tb_adc_pwdn_opcode.v
 
+run_test "GPIO dig5/dig7 split (AUDIT-S10)" \
+    tb/tb_audit_s10_gpio_split.vvp \
+    tb/tb_audit_s10_gpio_split.v
+
 echo ""
 
 # ===========================================================================

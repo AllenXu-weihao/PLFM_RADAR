@@ -839,7 +839,12 @@ if (USB_MODE == 0) begin : gen_ft601
         .status_agc_current_gain(rx_agc_current_gain),
         .status_agc_peak_magnitude(rx_agc_peak_magnitude),
         .status_agc_saturation_count(rx_agc_saturation_count),
-        .status_agc_enable(host_agc_enable)
+        .status_agc_enable(host_agc_enable),
+
+        // AUDIT-S10: control-fault flags exposed in status_words[5][6:5]
+        // for host-side observability (paired with gpio_dig7 split)
+        .status_range_decim_watchdog(rx_range_decim_watchdog),
+        .status_ddc_cic_fir_overrun(rx_ddc_cic_fir_overrun)
     );
 
     // FT2232H ports unused in FT601 mode — tie off
@@ -912,7 +917,12 @@ end else begin : gen_ft2232h
         .status_agc_current_gain(rx_agc_current_gain),
         .status_agc_peak_magnitude(rx_agc_peak_magnitude),
         .status_agc_saturation_count(rx_agc_saturation_count),
-        .status_agc_enable(host_agc_enable)
+        .status_agc_enable(host_agc_enable),
+
+        // AUDIT-S10: control-fault flags exposed in status_words[5][6:5]
+        // for host-side observability (paired with gpio_dig7 split)
+        .status_range_decim_watchdog(rx_range_decim_watchdog),
+        .status_ddc_cic_fir_overrun(rx_ddc_cic_fir_overrun)
     );
 
     // FT601 ports unused in FT2232H mode — tie off
@@ -1139,24 +1149,34 @@ end
 assign system_status = status_reg;
 
 // ============================================================================
-// FPGA→STM32 GPIO OUTPUTS (DIG_5, DIG_6, DIG_7)
+// FPGA→STM32 GPIO OUTPUTS (DIG_5, DIG_6, DIG_7) — AUDIT-S10 SPLIT
 // ============================================================================
-// DIG_5: AGC saturation flag — high when per-frame saturation_count > 0.
-//        STM32 reads PD13 to detect clipping and adjust ADAR1000 VGA gain.
-// DIG_6: AGC enable flag — mirrors host_agc_enable so STM32 outer-loop AGC
-//        tracks the FPGA register as single source of truth.
-// DIG_7: Reserved (tied low for future use).
-// gpio_dig5: "signal-chain clipped" — asserts on AGC saturation, DDC mixer/FIR
-// overflow, or MTI 2-pulse saturation. Audit F-6.1/F-6.3: these were all
-// previously invisible to the MCU.
+// AUDIT-S10: gpio_dig5 previously OR'd six unrelated flags (signal-saturation
+// AND control-faults), so the MCU outer-loop AGC could not distinguish
+// "I'm clipping, reduce RF gain" from "FFT chain stalled, reset me". Gain
+// reduction is the wrong response for a watchdog/CDC stall; it just hides the
+// stall behind a quiet receive chain. The split routes the two control-fault
+// classes (audit F-6.4 range-decimator watchdog, audit F-1.2 CIC→FIR CDC
+// overrun) to gpio_dig7 (PD15) so the MCU can react differently — log + reset
+// FPGA — without affecting the AGC loop. Status word visibility is added in
+// usb_data_interface[*_ft2232h].v so the host can graph each fault class
+// regardless of MCU consumption.
+//
+// DIG_5 (PD13): Signal-chain saturation — outer-loop AGC reduces RF gain.
+//               Asserts on AGC clipping, DDC mixer/filter overflow, or MTI
+//               2-pulse saturation (audit F-6.1/F-6.3).
+// DIG_6 (PD14): AGC enable mirror (host_agc_enable) — single source of truth.
+// DIG_7 (PD15): Control-chain fault — MCU should log + consider FPGA reset.
+//               Asserts on range-decimator watchdog (audit F-6.4) or CIC→FIR
+//               CDC overrun (audit F-1.2). MCU consumption is a tracked
+//               follow-up; until then the host telemetry path covers it.
 assign gpio_dig5 = (rx_agc_saturation_count != 8'd0)
                  | rx_ddc_overflow_any
                  | (rx_ddc_saturation_count != 3'd0)
-                 | (rx_mti_saturation_count != 8'd0)
-                 | rx_range_decim_watchdog    // audit F-6.4
-                 | rx_ddc_cic_fir_overrun;    // audit F-1.2
+                 | (rx_mti_saturation_count != 8'd0);
 assign gpio_dig6 = host_agc_enable;
-assign gpio_dig7 = 1'b0;
+assign gpio_dig7 = rx_range_decim_watchdog    // audit F-6.4
+                 | rx_ddc_cic_fir_overrun;    // audit F-1.2
 
 // ============================================================================
 // DEBUG AND VERIFICATION

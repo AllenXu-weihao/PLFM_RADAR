@@ -103,7 +103,15 @@ module usb_data_interface (
     input wire [3:0]  status_agc_current_gain,
     input wire [7:0]  status_agc_peak_magnitude,
     input wire [7:0]  status_agc_saturation_count,
-    input wire        status_agc_enable
+    input wire        status_agc_enable,
+
+    // AUDIT-S10: control-fault flags (clk domain). Exposed in status_words[5]
+    // [6:5] so host-side telemetry can graph each fault class independently
+    // of the gpio_dig7 split (which only the MCU observes). Both flags are
+    // sticky/slow-changing in the source domain (set on event, cleared by
+    // monitor reset), so 2-stage level CDC into ft601_clk_in is sufficient.
+    input wire        status_range_decim_watchdog,  // audit F-6.4
+    input wire        status_ddc_cic_fir_overrun    // audit F-1.2
 );
 
 // USB packet structure (same as before)
@@ -314,6 +322,13 @@ wire stream_cfar_en    = stream_ctrl_sync_1[2];
 // NOTE: status_req_toggle_100m declared above (before source-domain always block)
 (* ASYNC_REG = "TRUE" *) reg [1:0] status_req_sync;
 reg status_req_sync_prev;
+
+// AUDIT-S10: 2-stage level CDC for control-fault flags (clk → ft601_clk_in).
+// Sticky/slow-changing in source domain so 2-FF sync is sufficient.
+(* ASYNC_REG = "TRUE" *) reg range_decim_watchdog_sync_0;
+reg                          range_decim_watchdog_sync_1;
+(* ASYNC_REG = "TRUE" *) reg ddc_cic_fir_overrun_sync_0;
+reg                          ddc_cic_fir_overrun_sync_1;
 wire status_req_ft601 = status_req_sync[1] ^ status_req_sync_prev;
 
 // Status snapshot: captured in ft601_clk domain when status request arrives.
@@ -346,6 +361,11 @@ always @(posedge ft601_clk_in or negedge ft601_effective_reset_n) begin
         status_req_sync <= 2'b00;
         status_req_sync_prev <= 1'b0;
         status_word_idx <= 3'd0;
+        // AUDIT-S10: control-fault flag CDC reset
+        range_decim_watchdog_sync_0 <= 1'b0;
+        range_decim_watchdog_sync_1 <= 1'b0;
+        ddc_cic_fir_overrun_sync_0  <= 1'b0;
+        ddc_cic_fir_overrun_sync_1  <= 1'b0;
     end else begin
         // Synchronize valid strobes (2-stage sync chain)
         range_valid_sync   <= {range_valid_sync[0],   range_valid};
@@ -359,6 +379,12 @@ always @(posedge ft601_clk_in or negedge ft601_effective_reset_n) begin
         // Gap 2: status request CDC (toggle sync + edge detect)
         status_req_sync <= {status_req_sync[0], status_req_toggle_100m};
         status_req_sync_prev <= status_req_sync[1];
+
+        // AUDIT-S10: control-fault flag CDC (clk → ft601_clk_in, 2-stage)
+        range_decim_watchdog_sync_0 <= status_range_decim_watchdog;
+        range_decim_watchdog_sync_1 <= range_decim_watchdog_sync_0;
+        ddc_cic_fir_overrun_sync_0  <= status_ddc_cic_fir_overrun;
+        ddc_cic_fir_overrun_sync_1  <= ddc_cic_fir_overrun_sync_0;
 
         // Gap 2: Capture status snapshot when request arrives in ft601 domain
         if (status_req_ft601) begin
@@ -380,10 +406,17 @@ always @(posedge ft601_clk_in or negedge ft601_effective_reset_n) begin
                                 status_chirps_mismatch,         // [10] TX-G mismatch flag
                                 8'd0,                           // [9:2] reserved
                                 status_range_mode};             // [1:0]
-            // Word 5: Self-test results {reserved[6:0], busy, reserved[7:0], detail[7:0], reserved[2:0], flags[4:0]}
+            // Word 5: {reserved[6:0], self_test_busy[24], reserved[23:16],
+            //          self_test_detail[15:8], reserved[7], cic_fir_overrun[6],
+            //          range_decim_watchdog[5], self_test_flags[4:0]}
+            // AUDIT-S10: bits [6:5] expose control-fault classes that route
+            // to gpio_dig7 — gives host visibility regardless of MCU consumption.
             status_words[5] <= {7'd0, status_self_test_busy,
                                 8'd0, status_self_test_detail,
-                                3'd0, status_self_test_flags};
+                                1'd0,                          // [7] reserved
+                                ddc_cic_fir_overrun_sync_1,    // [6] audit F-1.2
+                                range_decim_watchdog_sync_1,   // [5] audit F-6.4
+                                status_self_test_flags};       // [4:0]
         end
 
         // Delayed version of sync[1] for edge detection
