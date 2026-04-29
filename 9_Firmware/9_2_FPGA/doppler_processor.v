@@ -134,6 +134,17 @@ reg frame_buffer_full;
 reg [9:0] chirps_received;
 reg [1:0] chirp_state;
 
+// AUDIT-S3 fix: arm-on-frame-start gating. Set when frame_start_pulse arrives
+// in S_IDLE; cleared when the FSM transitions to S_ACCUMULATE. Prevents stale
+// data_valid from prior MF pipeline residue from advancing S_IDLE → S_ACCUMULATE
+// before the new frame is officially started, which would write the first
+// sample(s) into addr 0 of the previous frame's buffer if write_chirp_index
+// happened to be non-zero. The pointer-reset invariant (line 287-288 always
+// zeros pointers at end of S_ACCUMULATE) makes this race benign in current
+// operation, but the gate makes the FSM robust against future code paths
+// that might leave pointers stale on entry to S_IDLE.
+reg frame_armed;
+
 // Sub-frame tracking
 reg current_sub_frame;   // 0=processing long, 1=processing short
 
@@ -246,6 +257,7 @@ always @(posedge clk or negedge reset_n) begin
         range_bin <= 0;
         sub_frame <= 0;
         current_sub_frame <= 0;
+        frame_armed <= 0;
     end else begin
         doppler_valid <= 0;
         fft_input_valid <= 0;
@@ -262,14 +274,24 @@ always @(posedge clk or negedge reset_n) begin
                     write_range_bin <= 0;
                     frame_buffer_full <= 0;
                     chirps_received <= 0;
+                    frame_armed <= 1;     // AUDIT-S3: arm on frame_start_pulse
                 end
-                
-                if (data_valid && !frame_buffer_full) begin
+
+                // AUDIT-S3 fix: only transition to S_ACCUMULATE when armed,
+                // i.e., when this frame has been officially started by a
+                // frame_start_pulse. Pre-fix code accepted any data_valid in
+                // S_IDLE and could race with a missing/late frame_start_pulse.
+                // (frame_start_pulse || frame_armed) admits the same-cycle case
+                // where both pulse and data_valid arrive together — write to
+                // addr 0 still resolves correctly because the BRAM write block
+                // uses the same gate.
+                if ((frame_start_pulse || frame_armed) && data_valid && !frame_buffer_full) begin
                     state <= S_ACCUMULATE;
                     write_range_bin <= 1;
+                    frame_armed <= 0;     // disarm; S_ACCUMULATE handles its own pointers
                 end
             end
-            
+
             S_ACCUMULATE: begin
                 if (data_valid) begin
                     if (write_range_bin < RANGE_BINS - 1) begin
@@ -393,14 +415,19 @@ always @(posedge clk) begin
         
         case (state)
             S_IDLE: begin
-                if (data_valid && !frame_buffer_full) begin
+                // AUDIT-S3 fix: gate BRAM write on frame_armed so stale
+                // data_valid arriving before frame_start_pulse cannot
+                // overwrite addr 0 of the buffer. Same gate as the FSM's
+                // S_IDLE → S_ACCUMULATE transition above, so the two blocks
+                // stay coherent.
+                if ((frame_start_pulse || frame_armed) && data_valid && !frame_buffer_full) begin
                     mem_we      <= 1;
                     mem_waddr_r <= mem_write_addr;
                     mem_wdata_i <= range_data[15:0];
                     mem_wdata_q <= range_data[31:16];
                 end
             end
-            
+
             S_ACCUMULATE: begin
                 if (data_valid) begin
                     mem_we      <= 1;

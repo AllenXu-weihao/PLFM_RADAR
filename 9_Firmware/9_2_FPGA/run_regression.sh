@@ -554,6 +554,10 @@ run_test "FT2232H Frame Drop Counter (AUDIT-C12)" \
     tb/tb_ft2232h_frame_drop.vvp \
     tb/tb_ft2232h_frame_drop.v usb_data_interface_ft2232h.v
 
+run_test "Doppler Frame-Start Gate (AUDIT-S3)" \
+    tb/tb_doppler_frame_start_gate.vvp \
+    tb/tb_doppler_frame_start_gate.v doppler_processor.v xfft_16.v fft_engine.v
+
 echo ""
 
 # ===========================================================================
