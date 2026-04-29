@@ -76,8 +76,7 @@ BMP180::BMP180(BMP180_RESOLUTION res_mode)
 /**************************************************************************/
 int32_t BMP180::getPressure(void)
 {
-  int32_t  UT       = 0;
-  int32_t  UP       = 0;
+  int32_t  UP_signed = 0;
   int32_t  B3       = 0;
   int32_t  B5       = 0;
   int32_t  B6       = 0;
@@ -88,13 +87,16 @@ int32_t BMP180::getPressure(void)
   uint32_t B4       = 0;
   uint32_t B7       = 0;
 
-  UT = readRawTemperature();                                            //read uncompensated temperature, 16-bit
-  if (UT == BMP180_ERROR) return BMP180_ERROR;                          //error handler, collision on i2c bus
+  /* AUDIT-C17: uint16_t raw_UT is widened to int32_t value-preserving;
+   * uint32_t raw_UP fits in int32_t (19-bit max). */
+  uint16_t raw_UT = 0;
+  uint32_t raw_UP = 0;
 
-  UP = readRawPressure();                                               //read uncompensated pressure, 19-bit
-  if (UP == BMP180_ERROR) return BMP180_ERROR;                          //error handler, collision on i2c bus
+  if (!readRawTemperature(&raw_UT)) return INT32_MIN;                   //I2C error sentinel (cannot collide with valid reading)
+  if (!readRawPressure(&raw_UP))    return INT32_MIN;
 
-  B5 = computeB5(UT);
+  B5 = computeB5((int32_t)raw_UT);
+  UP_signed = (int32_t)raw_UP;
 
   /* pressure calculation */
   B6 = B5 - 4000;
@@ -107,9 +109,9 @@ int32_t BMP180::getPressure(void)
   X2 = ((int32_t)_calCoeff.bmpB1 * ((B6 * B6) >> 12)) >> 16;
   X3 = ((X1 + X2) + 2) >> 2;
   B4 = ((uint32_t)_calCoeff.bmpAC4 * (X3 + 32768L)) >> 15;
-  B7 = (UP - B3) * (50000UL >> _resolution);
-  
-  if (B4 == 0) return BMP180_ERROR;                                     //safety check, avoiding division by zero
+  B7 = (UP_signed - B3) * (50000UL >> _resolution);
+
+  if (B4 == 0) return INT32_MIN;                                        //safety check, avoiding division by zero
 
   if   (B7 < 0x80000000) pressure = (B7 * 2) / B4;
   else                   pressure = (B7 / B4) * 2;
@@ -133,10 +135,16 @@ int32_t BMP180::getPressure(void)
 /**************************************************************************/
 float BMP180::getTemperature(void)
 {
-  int16_t rawTemperature = readRawTemperature();
+  /* AUDIT-C17: was `int16_t rawTemperature = readRawTemperature();`
+   * which silently narrowed uint16_t→int16_t. Bit-patterns ≥ 0x8000 (reachable
+   * across the BMP180 -40..+85 °C window) became negative int16_t and
+   * sign-extended to large negative int32_t inside computeB5(), producing
+   * temperature errors of order 100s of °C. Keep raw as uint16_t and widen
+   * to int32_t value-preservingly. */
+  uint16_t rawTemperature = 0;
+  if (!readRawTemperature(&rawTemperature)) return NAN;                                          //I2C error sentinel (cannot collide with any valid float reading)
 
-  if (rawTemperature == BMP180_ERROR) return BMP180_ERROR;                                       //error handler, collision on i2c bus
-                                      return (float)((computeB5(rawTemperature) + 8) >> 4) / 10;
+  return (float)((computeB5((int32_t)rawTemperature) + 8) >> 4) / 10;
 }
 
 /**************************************************************************/
@@ -162,8 +170,8 @@ int32_t BMP180::getSeaLevelPressure(int16_t trueAltitude)
 {
   int32_t pressure = getPressure();
 
-  if (pressure == BMP180_ERROR) return BMP180_ERROR;
-                                return (pressure / pow(1.0 - (float)trueAltitude / 44330, 5.255));
+  if (pressure == INT32_MIN) return INT32_MIN;                          //propagate I2C error sentinel
+  return (pressure / pow(1.0 - (float)trueAltitude / 44330, 5.255));
 }
 
 /**************************************************************************/
@@ -194,7 +202,9 @@ void BMP180::softReset(void)
 /**************************************************************************/
 uint8_t BMP180::readFirmwareVersion(void)
 {
-  return read8(BMP180_GET_VERSION_REG);
+  uint8_t v = 0;
+  read8(BMP180_GET_VERSION_REG, &v);  //best-effort telemetry; v stays 0 on I2C error
+  return v;
 }
 
 /**************************************************************************/
@@ -206,8 +216,10 @@ uint8_t BMP180::readFirmwareVersion(void)
 /**************************************************************************/
 uint8_t BMP180::readDeviceID(void)
 {
-  if (read8(BMP180_GET_ID_REG) == BMP180_CHIP_ID) return 180;
-                                                  return false;
+  uint8_t id = 0;
+  if (!read8(BMP180_GET_ID_REG, &id)) return 0;            //I2C error
+  if (id == BMP180_CHIP_ID)           return 180;
+  return 0;                                                //chip mismatch
 }
 
 /**************************************************************************/
@@ -224,13 +236,11 @@ uint8_t BMP180::readDeviceID(void)
 /**************************************************************************/
 bool BMP180::readCalibrationCoefficients()
 {
-  int32_t value = 0;
+  uint16_t value = 0;
 
   for (uint8_t reg = BMP180_CAL_AC1_REG; reg <= BMP180_CAL_MD_REG; reg++)
   {
-    value = read16(reg);
-
-    if (value == BMP180_ERROR) return false; //error handler, collision on i2c bus
+    if (!read16(reg, &value)) return false;  //AUDIT-C17: bool out-param signals I2C error without colliding with valid uint16 cal byte (e.g. 0x00FF)
 
     switch (reg)
     {
@@ -290,16 +300,16 @@ bool BMP180::readCalibrationCoefficients()
     Reads raw/uncompensated temperature value, 16-bit
 */
 /**************************************************************************/
-uint16_t BMP180::readRawTemperature(void)
+bool BMP180::readRawTemperature(uint16_t* out)
 {
   /* send temperature measurement command */
-  if (write8(BMP180_START_MEASURMENT_REG, BMP180_GET_TEMPERATURE_CTRL) != true) return BMP180_ERROR; //error handler, collision on i2c bus
+  if (!write8(BMP180_START_MEASURMENT_REG, BMP180_GET_TEMPERATURE_CTRL)) return false;             //I2C error
 
   /* set measurement delay */
    HAL_Delay(5);
 
-  /* read result */
-  return read16(BMP180_READ_ADC_MSB_REG);                                                            //reads msb + lsb
+  /* read result (msb + lsb); read16 sets *out only on success */
+  return read16(BMP180_READ_ADC_MSB_REG, out);
 }
 
 /**************************************************************************/
@@ -309,10 +319,11 @@ uint16_t BMP180::readRawTemperature(void)
     Reads raw/uncompensated pressure value, 19-bits
 */
 /**************************************************************************/
-uint32_t BMP180::readRawPressure(void)
+bool BMP180::readRawPressure(uint32_t* out)
 {
   uint8_t  regControl  = 0;
-  uint32_t rawPressure = 0;
+  uint16_t msb_lsb     = 0;
+  uint8_t  xlsb        = 0;
 
   /* convert resolution to register control */
   switch (_resolution)
@@ -335,7 +346,7 @@ uint32_t BMP180::readRawPressure(void)
   }
 
   /* send pressure measurement command */
-  if (write8(BMP180_START_MEASURMENT_REG, regControl) != true) return BMP180_ERROR; //error handler, collision on i2c bus
+  if (!write8(BMP180_START_MEASURMENT_REG, regControl)) return false;   //I2C error
 
   /* set measurement delay */
   switch (_resolution)
@@ -357,17 +368,15 @@ uint32_t BMP180::readRawPressure(void)
       break;
   }
 
-  /* read result msb + lsb */
-  rawPressure = read16(BMP180_READ_ADC_MSB_REG);        //16-bits
-  if (rawPressure == BMP180_ERROR) return BMP180_ERROR; //error handler, collision on i2c bus
+  /* read msb+lsb and xlsb separately; signal failure on either */
+  if (!read16(BMP180_READ_ADC_MSB_REG, &msb_lsb)) return false;
+  if (!read8(BMP180_READ_ADC_XLSB_REG, &xlsb))    return false;         //AUDIT-C17: previously OR'd in sentinel 0xFF on I2C fail, silently corrupting LSB
 
-  /* read result xlsb */
-  rawPressure <<= 8;
-  rawPressure |= read8(BMP180_READ_ADC_XLSB_REG);       //19-bits
-
+  uint32_t rawPressure = ((uint32_t)msb_lsb << 8) | xlsb;               //19-bits before shift
   rawPressure >>= (8 - _resolution);
 
-  return rawPressure;
+  *out = rawPressure;
+  return true;
 }
 
 /**************************************************************************/
@@ -396,20 +405,21 @@ int32_t BMP180::computeB5(int32_t UT)
     Reads 8-bit value over I2C
 */
 /**************************************************************************/
-uint8_t BMP180::read8(uint8_t reg)
+bool BMP180::read8(uint8_t reg, uint8_t* out)
 {
   uint8_t data = 0;
   HAL_StatusTypeDef status;
-  
+
   // Write register address
   status = HAL_I2C_Master_Transmit(&hi2c3, BMP180_ADDRESS, &reg, 1, I2C_TIMEOUT);
-  if (status != HAL_OK) return BMP180_ERROR;
-  
+  if (status != HAL_OK) return false;
+
   // Read data from register
   status = HAL_I2C_Master_Receive(&hi2c3, BMP180_ADDRESS, &data, 1, I2C_TIMEOUT);
-  if (status != HAL_OK) return BMP180_ERROR;
-  
-  return data;
+  if (status != HAL_OK) return false;
+
+  *out = data;
+  return true;
 }
 
 /**************************************************************************/
@@ -420,24 +430,22 @@ uint8_t BMP180::read8(uint8_t reg)
 */
 /**************************************************************************/
 
-uint16_t BMP180::read16(uint8_t reg)
+bool BMP180::read16(uint8_t reg, uint16_t* out)
 {
   uint8_t data[2] = {0, 0};
-  uint16_t value = 0;
   HAL_StatusTypeDef status;
-  
+
   // Write register address
   status = HAL_I2C_Master_Transmit(&hi2c3, BMP180_ADDRESS, &reg, 1, I2C_TIMEOUT);
-  if (status != HAL_OK) return BMP180_ERROR;
-  
+  if (status != HAL_OK) return false;
+
   // Read 2 bytes from register
   status = HAL_I2C_Master_Receive(&hi2c3, BMP180_ADDRESS, data, 2, I2C_TIMEOUT);
-  if (status != HAL_OK) return BMP180_ERROR;
-  
+  if (status != HAL_OK) return false;
+
   // Combine bytes (MSB first)
-  value = (data[0] << 8) | data[1];
-  
-  return value;
+  *out = ((uint16_t)data[0] << 8) | data[1];
+  return true;
 }
 
 

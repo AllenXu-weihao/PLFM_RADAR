@@ -101,7 +101,13 @@ BMP180_CAL_REG;
 /* misc */
 #define BMP180_CHIP_ID                0x55   //id number
 
-#define BMP180_ERROR                  255    //returns 255, if communication error is occurred
+/* AUDIT-C17: in-band sentinel BMP180_ERROR=255 removed.
+ * 255 is a perfectly valid uint16_t reading from any cal-coefficient or
+ * raw-temperature/pressure register, so a sensor failure could not be
+ * distinguished from a real reading. I/O helpers now return bool and pass
+ * the value through an out-param; getTemperature() returns NaN on error,
+ * getPressure()/getSeaLevelPressure() return INT32_MIN. None of these
+ * sentinels collide with valid sensor output. */
 
 #define BMP180_ADDRESS (0x77 << 1) // HAL requires 7-bit address shifted left by 1 bit
 
@@ -145,11 +151,11 @@ class BMP180
   uint8_t  _resolution;
 
   bool     readCalibrationCoefficients(void);
-  uint16_t readRawTemperature(void);
-  uint32_t readRawPressure(void);
+  bool     readRawTemperature(uint16_t* out);
+  bool     readRawPressure(uint32_t* out);
   int32_t  computeB5(int32_t UT);
-  uint8_t  read8(uint8_t reg);
-  uint16_t read16(uint8_t reg);
+  bool     read8(uint8_t reg, uint8_t* out);
+  bool     read16(uint8_t reg, uint16_t* out);
   bool     write8(uint8_t reg, uint8_t control);
 };
 
