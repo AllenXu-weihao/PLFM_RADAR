@@ -67,7 +67,7 @@ module range_bin_decimator #(
     output wire [2:0]  fv_state,
     output wire [10:0] fv_in_bin_count,
     output wire [1:0]  fv_group_sample_count,
-    output wire [8:0]  fv_output_bin_count,
+    output wire [`RP_RANGE_BIN_WIDTH_MAX-1:0] fv_output_bin_count,
     output wire [10:0] fv_skip_count
 `endif
 );
@@ -143,7 +143,7 @@ always @(posedge clk or negedge reset_n) begin
         state             <= ST_IDLE;
         in_bin_count      <= 11'd0;
         group_sample_count <= 2'd0;
-        output_bin_count  <= 9'd0;
+        output_bin_count  <= {`RP_RANGE_BIN_WIDTH_MAX{1'b0}};
         skip_count        <= 11'd0;
         watchdog_count    <= 10'd0;
         watchdog_timeout  <= 1'b0;
@@ -170,7 +170,7 @@ always @(posedge clk or negedge reset_n) begin
         ST_IDLE: begin
             in_bin_count       <= 11'd0;
             group_sample_count <= 2'd0;
-            output_bin_count   <= 9'd0;
+            output_bin_count   <= {`RP_RANGE_BIN_WIDTH_MAX{1'b0}};
             skip_count         <= 11'd0;
             watchdog_count     <= 10'd0;
             peak_i             <= 16'd0;
