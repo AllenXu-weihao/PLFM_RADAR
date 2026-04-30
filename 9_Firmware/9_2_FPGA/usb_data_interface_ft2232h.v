@@ -115,7 +115,7 @@ module usb_data_interface_ft2232h (
     // (4096 bins, 131072 cells) requires a wire-protocol extension before
     // bins 512..4095 can be transported to the host.
     input wire [`RP_RANGE_BIN_WIDTH_MAX-1:0] range_bin_in,
-    input wire [4:0]                         doppler_bin_in,  // 5-bit doppler bin index
+    input wire [`RP_DOPPLER_BIN_WIDTH-1:0]   doppler_bin_in,  // 6-bit (PR-F): {sub_frame[1:0], bin[3:0]}
     input wire                               frame_complete,  // 1-cycle pulse from radar_receiver_final edge detector
 
     // FT2232H Physical Interface (245 Synchronous FIFO mode)
@@ -181,9 +181,18 @@ localparam FOOTER        = 8'h55;
 localparam STATUS_HEADER = 8'hBB;
 
 localparam NUM_RANGE_BINS  = `RP_NUM_RANGE_BINS;   // 512
-localparam NUM_DOPPLER_BINS = `RP_NUM_DOPPLER_BINS; // 32
+localparam NUM_DOPPLER_BINS = `RP_NUM_DOPPLER_BINS; // 48 (PR-F)
 localparam RANGE_BIN_BITS  = `RP_RANGE_BIN_BITS;    // 9
-localparam FRAME_CELLS     = NUM_RANGE_BINS * NUM_DOPPLER_BINS; // 16384
+localparam DOPPLER_BIN_BITS = `RP_DOPPLER_BIN_WIDTH;// 6 (PR-F)
+// PR-F: pad FRAME_CELLS to next-power-of-2 along the doppler axis so the
+// {range, doppler[N-1:0]} concatenation lands in a contiguous BRAM block per
+// range bin. Costs ~10 extra RAMB18 vs the previous 16K-cell packing but
+// avoids a per-write multiply on the 100 MHz path.
+localparam FRAME_CELLS     = NUM_RANGE_BINS * (1 << DOPPLER_BIN_BITS);     // 32768 (PR-F)
+// Frame-cell address widths.
+localparam FRAME_ADDR_W      = RANGE_BIN_BITS + DOPPLER_BIN_BITS;          // 15
+localparam DETECT_BYTE_ADDR_W = FRAME_ADDR_W - 3;                          // 12
+localparam DETECT_BYTE_LAST   = (FRAME_CELLS / 8) - 1;                     // 4095
 
 // Frame header: 8 bytes (0xAA + flags + frame_num[2] + range_bins[2] + doppler_bins[2])
 localparam FRAME_HDR_BYTES = 8;
@@ -250,7 +259,7 @@ assign ft_data = ft_data_oe ? ft_data_out : 8'hZZ;
 (* ram_style = "block" *) reg [15:0] doppler_mag_bram [0:FRAME_CELLS-1];
 
 // Write port (clk domain)
-reg [13:0] mag_wr_addr;
+reg [FRAME_ADDR_W-1:0] mag_wr_addr;        // PR-F: 15-bit
 reg [15:0] mag_wr_data;
 reg        mag_wr_en;
 
@@ -260,7 +269,7 @@ always @(posedge clk) begin
 end
 
 // Read port (ft_clk domain)
-reg [13:0] mag_rd_addr;
+reg [FRAME_ADDR_W-1:0] mag_rd_addr;        // PR-F: 15-bit
 reg [15:0] mag_rd_data;
 
 always @(posedge ft_clk) begin
@@ -315,9 +324,9 @@ end
 // a 1-cycle read then 1-cycle write-back with the bit set. This works because
 // CFAR outputs arrive one cell per clock cycle (sequential scan).
 
-(* ram_style = "block" *) reg [7:0] detect_bram [0:2047];
+(* ram_style = "block" *) reg [7:0] detect_bram [0:DETECT_BYTE_LAST];  // PR-F: 3072 entries (was 2048)
 
-reg [10:0] detect_wr_addr;
+reg [DETECT_BYTE_ADDR_W-1:0] detect_wr_addr;     // PR-F: 12-bit byte addr (was 11)
 reg [7:0]  detect_wr_data;
 reg        detect_wr_en;
 
@@ -326,15 +335,15 @@ always @(posedge clk) begin
         detect_bram[detect_wr_addr] <= detect_wr_data;
 end
 
-reg [10:0] detect_rd_addr;
-reg [7:0]  detect_rd_data;
+reg [DETECT_BYTE_ADDR_W-1:0] detect_rd_addr;     // PR-F: 12-bit byte addr (was 11)
+reg [7:0]                     detect_rd_data;
 
 always @(posedge ft_clk) begin
     detect_rd_data <= detect_bram[detect_rd_addr];
 end
 
 // Detection BRAM read-modify-write pipeline (clk domain)
-reg [10:0] detect_rmw_addr;
+reg [DETECT_BYTE_ADDR_W-1:0] detect_rmw_addr;    // PR-F: 12-bit byte addr (was 11)
 reg [7:0]  detect_rmw_rd;
 reg [2:0]  detect_rmw_bit;
 reg        detect_rmw_value;
@@ -380,7 +389,7 @@ wire [15:0] range_mag = range_manhattan[16] ? 16'hFFFF : range_manhattan[15:0];
 reg [15:0] frame_number;        // Incrementing frame counter
 reg        frame_ready_toggle;  // Toggle CDC: frame ready for USB transfer
 reg        frame_filling;       // 1 = currently accumulating frame data
-reg [13:0] detect_clear_addr;   // Counter for bulk-clearing detection BRAM
+reg [FRAME_ADDR_W-1:0] detect_clear_addr;   // PR-F: 15-bit bit-counter (FRAME_CELLS = 24576 < 32768)
 reg        detect_clearing;     // 1 = bulk clear in progress
 
 // Range bin counter for range profile writes
@@ -409,18 +418,18 @@ always @(posedge clk or negedge reset_n) begin
         frame_ready_toggle <= 1'b0;
         frame_filling      <= 1'b1;
         mag_wr_en          <= 1'b0;
-        mag_wr_addr        <= 14'd0;
+        mag_wr_addr        <= {FRAME_ADDR_W{1'b0}};
         mag_wr_data        <= 16'd0;
         range_wr_en        <= 1'b0;
         range_wr_addr      <= {RANGE_BIN_BITS{1'b0}};
         range_wr_data      <= 16'd0;
         detect_wr_en       <= 1'b0;
-        detect_wr_addr     <= 11'd0;
+        detect_wr_addr     <= {DETECT_BYTE_ADDR_W{1'b0}};
         detect_wr_data     <= 8'd0;
         detect_clearing    <= 1'b0;
-        detect_clear_addr  <= 14'd0;
+        detect_clear_addr  <= {FRAME_ADDR_W{1'b0}};
         detect_rmw_state   <= 2'd0;
-        detect_rmw_addr    <= 11'd0;
+        detect_rmw_addr    <= {DETECT_BYTE_ADDR_W{1'b0}};
         detect_rmw_bit     <= 3'd0;
         detect_rmw_value   <= 1'b0;
         range_write_counter <= {RANGE_BIN_BITS{1'b0}};
@@ -431,15 +440,17 @@ always @(posedge clk or negedge reset_n) begin
         detect_wr_en <= 1'b0;
 
         // === Detection BRAM bulk clear (runs after frame_complete) ===
+        // PR-F: bit-counter is FRAME_ADDR_W (15-bit), byte addr is the upper
+        // (FRAME_ADDR_W-3) bits.
         if (detect_clearing) begin
             detect_wr_en   <= 1'b1;
-            detect_wr_addr <= detect_clear_addr[13:3];
+            detect_wr_addr <= detect_clear_addr[FRAME_ADDR_W-1:3];
             detect_wr_data <= 8'd0;
-            if (detect_clear_addr[13:3] == 11'd2047) begin
+            if (detect_clear_addr[FRAME_ADDR_W-1:3] == DETECT_BYTE_LAST[DETECT_BYTE_ADDR_W-1:0]) begin
                 detect_clearing   <= 1'b0;
-                detect_clear_addr <= 14'd0;
+                detect_clear_addr <= {FRAME_ADDR_W{1'b0}};
             end else begin
-                detect_clear_addr <= detect_clear_addr + 14'd8;  // Step by 8 bits = 1 byte
+                detect_clear_addr <= detect_clear_addr + 15'd8;  // Step by 8 bits = 1 byte
             end
         end
 
@@ -479,11 +490,10 @@ always @(posedge clk or negedge reset_n) begin
         end
 
         // === CFAR detection write (read-modify-write) ===
+        // PR-F: bit_addr = {range_bin_in[8:0], doppler_bin_in[5:0]} = 15-bit.
+        // byte_addr = bit_addr[14:3] (12 bits), bit_pos = bit_addr[2:0].
         if (cfar_valid && frame_filling && detect_rmw_state == 2'd0 && !detect_clearing) begin
-            // Start RMW: compute byte address and bit position
-            // bit_addr = {range_bin_in, doppler_bin_in} = 14-bit
-            // byte_addr = bit_addr[13:3], bit_pos = bit_addr[2:0]
-            detect_rmw_addr  <= {range_bin_in, doppler_bin_in[4:3]};
+            detect_rmw_addr  <= {range_bin_in, doppler_bin_in[DOPPLER_BIN_BITS-1:3]};
             detect_rmw_bit   <= doppler_bin_in[2:0];
             detect_rmw_value <= cfar_detection;
             detect_rmw_state <= 2'd1;
@@ -525,7 +535,7 @@ always @(posedge clk or negedge reset_n) begin
         if (!frame_filling && !frame_complete) begin
             frame_filling     <= 1'b1;
             detect_clearing   <= 1'b1;  // Clear detection BRAM for next frame
-            detect_clear_addr <= 14'd0;
+            detect_clear_addr <= {FRAME_ADDR_W{1'b0}};
         end
     end
 end
@@ -640,10 +650,10 @@ reg [31:0] status_words [0:5];
 reg [15:0] wr_byte_idx;
 
 // BRAM read address for frame transfer
-reg [13:0] bram_rd_cell;     // Cell index 0..16383 for doppler/detect
-reg [RANGE_BIN_BITS-1:0] range_rd_idx;  // Range bin index 0..511
-reg        wr_byte_phase;    // 0=MSB, 1=LSB for 16-bit values
-reg [10:0] detect_rd_idx;    // Byte index 0..2047 for detection flags
+reg [FRAME_ADDR_W-1:0] bram_rd_cell;     // PR-F: 15-bit cell index 0..24575
+reg [RANGE_BIN_BITS-1:0] range_rd_idx;   // Range bin index 0..511
+reg        wr_byte_phase;                // 0=MSB, 1=LSB for 16-bit values
+reg [DETECT_BYTE_ADDR_W-1:0] detect_rd_idx; // PR-F: 12-bit byte index 0..3071
 
 // ============================================================================
 // CLOCK-ACTIVITY WATCHDOG (clk domain)
@@ -732,12 +742,12 @@ always @(posedge ft_clk or negedge ft_effective_reset_n) begin
         wr_state       <= WR_IDLE;
         wr_byte_idx    <= 16'd0;
         wr_byte_phase  <= 1'b0;
-        bram_rd_cell   <= 14'd0;
+        bram_rd_cell   <= {FRAME_ADDR_W{1'b0}};
         range_rd_idx   <= {RANGE_BIN_BITS{1'b0}};
         range_rd_addr  <= {RANGE_BIN_BITS{1'b0}};
-        detect_rd_idx  <= 11'd0;
-        detect_rd_addr <= 11'd0;
-        mag_rd_addr    <= 14'd0;
+        detect_rd_idx  <= {DETECT_BYTE_ADDR_W{1'b0}};
+        detect_rd_addr <= {DETECT_BYTE_ADDR_W{1'b0}};
+        mag_rd_addr    <= {FRAME_ADDR_W{1'b0}};
         rd_state        <= RD_IDLE;
         rd_byte_cnt     <= 2'd0;
         rd_cmd_complete <= 1'b0;
@@ -891,12 +901,12 @@ always @(posedge ft_clk or negedge ft_effective_reset_n) begin
                     else if (frame_ready_ft && ft_rxf_n) begin
                         wr_state      <= WR_FRAME_HDR;
                         wr_byte_idx   <= 16'd0;
-                        bram_rd_cell  <= 14'd0;
+                        bram_rd_cell  <= {FRAME_ADDR_W{1'b0}};
                         range_rd_idx  <= {RANGE_BIN_BITS{1'b0}};
                         range_rd_addr <= {RANGE_BIN_BITS{1'b0}};  // Pre-load first read addr
-                        detect_rd_idx <= 11'd0;
-                        detect_rd_addr <= 11'd0;
-                        mag_rd_addr   <= 14'd0;
+                        detect_rd_idx <= {DETECT_BYTE_ADDR_W{1'b0}};
+                        detect_rd_addr <= {DETECT_BYTE_ADDR_W{1'b0}};
+                        mag_rd_addr   <= {FRAME_ADDR_W{1'b0}};
                         wr_byte_phase <= 1'b0;
                     end
                 end
@@ -960,8 +970,8 @@ always @(posedge ft_clk or negedge ft_effective_reset_n) begin
                         if (wr_byte_idx == RANGE_SECTION_BYTES[15:0] - 16'd1) begin
                             wr_byte_idx   <= 16'd0;
                             wr_byte_phase <= 1'b0;
-                            bram_rd_cell  <= 14'd0;
-                            mag_rd_addr   <= 14'd0;
+                            bram_rd_cell  <= {FRAME_ADDR_W{1'b0}};
+                            mag_rd_addr   <= {FRAME_ADDR_W{1'b0}};
                             if (stream_flags_snapshot[1])
                                 wr_state <= WR_DOPPLER_DATA;
                             else if (stream_flags_snapshot[2])
@@ -985,8 +995,8 @@ always @(posedge ft_clk or negedge ft_effective_reset_n) begin
                         end else begin
                             ft_data_out   <= mag_rd_data[7:0];
                             wr_byte_phase <= 1'b0;
-                            bram_rd_cell  <= bram_rd_cell + 14'd1;
-                            mag_rd_addr   <= bram_rd_cell + 14'd1;
+                            bram_rd_cell  <= bram_rd_cell + {{(FRAME_ADDR_W-1){1'b0}}, 1'b1};
+                            mag_rd_addr   <= bram_rd_cell + {{(FRAME_ADDR_W-1){1'b0}}, 1'b1};
                         end
 
                         wr_byte_idx <= wr_byte_idx + 16'd1;
@@ -994,8 +1004,8 @@ always @(posedge ft_clk or negedge ft_effective_reset_n) begin
                         if (wr_byte_idx == DOPPLER_MAG_SECTION_BYTES[15:0] - 16'd1) begin
                             wr_byte_idx    <= 16'd0;
                             wr_byte_phase  <= 1'b0;
-                            detect_rd_idx  <= 11'd0;
-                            detect_rd_addr <= 11'd0;
+                            detect_rd_idx  <= {DETECT_BYTE_ADDR_W{1'b0}};
+                            detect_rd_addr <= {DETECT_BYTE_ADDR_W{1'b0}};
                             if (stream_flags_snapshot[2])
                                 wr_state <= WR_DETECT_DATA;
                             else
@@ -1012,8 +1022,8 @@ always @(posedge ft_clk or negedge ft_effective_reset_n) begin
 
                         // 1-byte per cycle (BRAM read latency handled by pre-loading addr)
                         ft_data_out    <= detect_rd_data;
-                        detect_rd_idx  <= detect_rd_idx + 11'd1;
-                        detect_rd_addr <= detect_rd_idx + 11'd1;
+                        detect_rd_idx  <= detect_rd_idx + {{(DETECT_BYTE_ADDR_W-1){1'b0}}, 1'b1};
+                        detect_rd_addr <= detect_rd_idx + {{(DETECT_BYTE_ADDR_W-1){1'b0}}, 1'b1};
 
                         wr_byte_idx <= wr_byte_idx + 16'd1;
 

@@ -23,7 +23,7 @@ module radar_receiver_final (
 
     output wire [31:0] doppler_output,
     output wire doppler_valid,
-    output wire [4:0] doppler_bin,
+    output wire [`RP_DOPPLER_BIN_WIDTH-1:0] doppler_bin,
     output wire [`RP_RANGE_BIN_WIDTH_MAX-1:0] range_bin,  // 9-bit
     
     // Raw matched-filter output (debug/bring-up)

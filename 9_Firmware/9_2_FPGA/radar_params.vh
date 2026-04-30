@@ -77,9 +77,9 @@
 `define RP_RANGE_BIN_BITS       9       // ceil(log2(512))
 `define RP_DOPPLER_FFT_SIZE     16      // Per sub-frame Doppler FFT (scan mode)
 `define RP_DOPPLER_FFT_SIZE_TRACK 64    // Track-mode dwell N (xfft_64, single waveform)
-`define RP_CHIRPS_PER_FRAME     32      // (LEGACY: scan-only 2-subframe; bumped to 48 in PR-F)
+`define RP_CHIRPS_PER_FRAME     48      // 3 sub-frames * 16 chirps = 48 (PR-F)
 `define RP_CHIRPS_PER_SUBFRAME  16      // Chirps per Doppler sub-frame
-`define RP_NUM_DOPPLER_BINS     32      // (LEGACY: 2 sub-frames * 16 = 32; bumped to 48 in PR-F)
+`define RP_NUM_DOPPLER_BINS     48      // 3 sub-frames * 16 bins = 48 (PR-F)
 `define RP_DATA_WIDTH           16      // ADC/processing data width
 
 // 3-ladder waveform identity (replaces 1-bit use_long_chirp rail in PR-C onward)
@@ -153,13 +153,13 @@
 `ifdef SUPPORT_LONG_RANGE
   `define RP_SEGMENT_IDX_WIDTH      3
   `define RP_RANGE_BIN_WIDTH_MAX    12      // ceil(log2(4096))
-  `define RP_DOPPLER_MEM_ADDR_W     17      // ceil(log2(4096*32)) = 17
-  `define RP_CFAR_MAG_ADDR_W        17      // ceil(log2(4096*32)) = 17
+  `define RP_DOPPLER_MEM_ADDR_W     18      // ceil(log2(4096*48)) = 18 (PR-F)
+  `define RP_CFAR_MAG_ADDR_W        18      // ceil(log2(4096*48)) = 18 (PR-F)
 `else
   `define RP_SEGMENT_IDX_WIDTH      2
   `define RP_RANGE_BIN_WIDTH_MAX    9       // ceil(log2(512))
-  `define RP_DOPPLER_MEM_ADDR_W     14      // ceil(log2(512*32)) = 14
-  `define RP_CFAR_MAG_ADDR_W        14      // ceil(log2(512*32)) = 14
+  `define RP_DOPPLER_MEM_ADDR_W     15      // ceil(log2(512*48)) = 15 (PR-F)
+  `define RP_CFAR_MAG_ADDR_W        15      // ceil(log2(512*48)) = 15 (PR-F)
 `endif
 
 // Derived depths (for memory declarations)

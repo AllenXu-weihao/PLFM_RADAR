@@ -24,6 +24,8 @@
  *   T14: cfar_busy asserts during processing, deasserts after
  */
 
+`include "radar_params.vh"
+
 module tb_cfar_ca;
 
 // ============================================================================
@@ -43,24 +45,28 @@ reg reset_n;
 
 reg [31:0] doppler_data;
 reg        doppler_valid;
-reg [4:0]  doppler_bin_in;
-reg [5:0]  range_bin_in;
+reg [`RP_DOPPLER_BIN_WIDTH-1:0] doppler_bin_in;
+reg [`RP_RANGE_BIN_WIDTH_MAX-1:0] range_bin_in;
 reg        frame_complete;
 
 reg [3:0]  cfg_guard_cells;
 reg [4:0]  cfg_train_cells;
 reg [ALPHA_W-1:0] cfg_alpha;
+reg [ALPHA_W-1:0] cfg_alpha_soft;            // PR-F
 reg [1:0]  cfg_cfar_mode;
 reg        cfg_cfar_enable;
 reg [15:0] cfg_simple_threshold;
 
 wire        detect_flag;
+wire [`RP_DETECT_CLASS_WIDTH-1:0] detect_class;  // PR-F
 wire        detect_valid;
-wire [5:0]  detect_range;
-wire [4:0]  detect_doppler;
+wire [`RP_RANGE_BIN_WIDTH_MAX-1:0] detect_range;
+wire [`RP_DOPPLER_BIN_WIDTH-1:0]   detect_doppler;
 wire [MAG_W-1:0] detect_magnitude;
 wire [MAG_W-1:0] detect_threshold;
+wire [MAG_W-1:0] detect_threshold_soft;       // PR-F
 wire [15:0] detect_count;
+wire [15:0] detect_count_cand;                // PR-F
 wire        cfar_busy;
 wire [7:0]  cfar_status;
 
@@ -84,8 +90,8 @@ reg [255:0] test_name;
 
 // Detection capture (flagged detections only)
 integer det_cap_count;
-reg [5:0]  det_cap_range  [0:255];
-reg [4:0]  det_cap_doppler[0:255];
+reg [`RP_RANGE_BIN_WIDTH_MAX-1:0] det_cap_range  [0:255];
+reg [`RP_DOPPLER_BIN_WIDTH-1:0]   det_cap_doppler[0:255];
 reg [MAG_W-1:0] det_cap_mag[0:255];
 reg [MAG_W-1:0] det_cap_thr[0:255];
 reg        det_cap_flag   [0:255];
@@ -110,16 +116,20 @@ cfar_ca #(
     .cfg_guard_cells(cfg_guard_cells),
     .cfg_train_cells(cfg_train_cells),
     .cfg_alpha(cfg_alpha),
+    .cfg_alpha_soft(cfg_alpha_soft),       // PR-F
     .cfg_cfar_mode(cfg_cfar_mode),
     .cfg_cfar_enable(cfg_cfar_enable),
     .cfg_simple_threshold(cfg_simple_threshold),
     .detect_flag(detect_flag),
+    .detect_class(detect_class),           // PR-F
     .detect_valid(detect_valid),
     .detect_range(detect_range),
     .detect_doppler(detect_doppler),
     .detect_magnitude(detect_magnitude),
     .detect_threshold(detect_threshold),
+    .detect_threshold_soft(detect_threshold_soft),  // PR-F
     .detect_count(detect_count),
+    .detect_count_cand(detect_count_cand), // PR-F
     .cfar_busy(cfar_busy),
     .cfar_status(cfar_status)
 );
@@ -165,8 +175,8 @@ endtask
 
 // Feed one Doppler sample (I/Q packed as {Q, I})
 task feed_sample;
-    input [5:0] rbin;
-    input [4:0] dbin;
+    input [`RP_RANGE_BIN_WIDTH_MAX-1:0] rbin;
+    input [`RP_DOPPLER_BIN_WIDTH-1:0]   dbin;
     input signed [15:0] i_val;
     input signed [15:0] q_val;
     begin
@@ -184,8 +194,8 @@ endtask
 // noise_level: base I value for all cells
 // num_targets: number of target cells
 // tgt_range[0..3], tgt_doppler[0..3], tgt_level[0..3]: target parameters
-reg [5:0]  tgt_range  [0:7];
-reg [4:0]  tgt_doppler[0:7];
+reg [`RP_RANGE_BIN_WIDTH_MAX-1:0] tgt_range  [0:7];
+reg [`RP_DOPPLER_BIN_WIDTH-1:0]   tgt_doppler[0:7];
 reg [15:0] tgt_level  [0:7];
 integer    num_targets;
 
@@ -207,7 +217,9 @@ task feed_frame;
                         i_val = tgt_level[t];
                     end
                 end
-                feed_sample(r[5:0], d[4:0], $signed(i_val), 16'sd0);
+                feed_sample(r[`RP_RANGE_BIN_WIDTH_MAX-1:0],
+                            d[`RP_DOPPLER_BIN_WIDTH-1:0],
+                            $signed(i_val), 16'sd0);
             end
         end
     end
@@ -304,6 +316,11 @@ initial begin
     cfg_guard_cells = 4'd2;
     cfg_train_cells = 5'd8;
     cfg_alpha = 8'h30;
+    // PR-F: pin alpha_soft to max so the candidate tier never triggers in
+    // these tests — preserves the original "detect_flag means CONFIRMED"
+    // semantics. The 2-class detection path is exercised by tb_system_e2e
+    // (live data) rather than this unit test.
+    cfg_alpha_soft = 8'hFF;
     cfg_cfar_mode = 2'b00;
     cfg_cfar_enable = 1'b1;
     cfg_simple_threshold = 16'd5000;

@@ -112,7 +112,7 @@ module radar_system_top_50t (
     wire        new_chirp_frame_nc;
     wire [31:0] dbg_doppler_data_nc;
     wire        dbg_doppler_valid_nc;
-    wire [4:0]  dbg_doppler_bin_nc;
+    wire [`RP_DOPPLER_BIN_WIDTH-1:0] dbg_doppler_bin_nc;
     wire [5:0]  dbg_range_bin_nc;
     wire [3:0]  system_status_nc;
 

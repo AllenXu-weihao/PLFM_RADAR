@@ -23,6 +23,8 @@
  *   vvp tb/tb_doppler_realdata.vvp
  */
 
+`include "radar_params.vh"
+
 module tb_doppler_realdata;
 
 // ============================================================================
@@ -56,16 +58,23 @@ reg         data_valid;
 reg         new_chirp_frame;
 wire [31:0] doppler_output;
 wire        doppler_valid;
-wire [4:0]  doppler_bin;
-wire [5:0]  range_bin;
+wire [`RP_DOPPLER_BIN_WIDTH-1:0] doppler_bin;
+wire [`RP_RANGE_BIN_WIDTH_MAX-1:0] range_bin;
 wire        processing_active;
 wire        frame_complete;
 wire [3:0]  dut_status;
 
 // ============================================================================
-// DUT INSTANTIATION
+// DUT INSTANTIATION — override CHIRPS_PER_FRAME=32 to keep this TB compatible
+// with the legacy 2-subframe golden vectors (chirp-v2 production runs 3
+// sub-frames at 48 chirps/frame; the Doppler FSM is parameterised over
+// NUM_SUBFRAMES = CHIRPS_PER_FRAME / CHIRPS_PER_SUBFRAME).
 // ============================================================================
-doppler_processor_optimized dut (
+doppler_processor_optimized #(
+    .CHIRPS_PER_FRAME(32),
+    .CHIRPS_PER_SUBFRAME(16),
+    .RANGE_BINS(64)
+) dut (
     .clk(clk),
     .reset_n(reset_n),
     .range_data(range_data),
@@ -109,8 +118,8 @@ end
 // ============================================================================
 reg signed [15:0] cap_out_i [0:TOTAL_OUTPUTS-1];
 reg signed [15:0] cap_out_q [0:TOTAL_OUTPUTS-1];
-reg [5:0]  cap_rbin  [0:TOTAL_OUTPUTS-1];
-reg [4:0]  cap_dbin  [0:TOTAL_OUTPUTS-1];
+reg [`RP_RANGE_BIN_WIDTH_MAX-1:0] cap_rbin  [0:TOTAL_OUTPUTS-1];
+reg [`RP_DOPPLER_BIN_WIDTH-1:0]   cap_dbin  [0:TOTAL_OUTPUTS-1];
 integer out_count;
 
 // ============================================================================

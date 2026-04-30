@@ -102,11 +102,12 @@
 // CFAR magnitude BRAM depth uses `RP_CFAR_MAG_DEPTH which already scales.
 module cfar_ca #(
     parameter NUM_RANGE_BINS   = `RP_MAX_OUTPUT_BINS,   // 512 (50T) / 4096 (200T)
-    parameter NUM_DOPPLER_BINS = `RP_NUM_DOPPLER_BINS,  // 32
+    parameter NUM_DOPPLER_BINS = `RP_NUM_DOPPLER_BINS,  // 48 (PR-F)
     parameter MAG_WIDTH        = 17,
     parameter ALPHA_WIDTH      = 8,
     parameter MAX_GUARD        = 8,
-    parameter MAX_TRAIN        = 16
+    parameter MAX_TRAIN        = 16,
+    parameter DBIN_WIDTH       = `RP_DOPPLER_BIN_WIDTH  // 6 (PR-F)
 ) (
     input wire clk,
     input wire reset_n,
@@ -114,7 +115,7 @@ module cfar_ca #(
     // ========== DOPPLER PROCESSOR INPUTS ==========
     input wire [31:0] doppler_data,
     input wire        doppler_valid,
-    input wire [4:0]  doppler_bin_in,
+    input wire [DBIN_WIDTH-1:0] doppler_bin_in,
     input wire [`RP_RANGE_BIN_WIDTH_MAX-1:0] range_bin_in,  // 9-bit (50T) / 12-bit (200T)
     input wire        frame_complete,
 
@@ -122,20 +123,24 @@ module cfar_ca #(
     input wire [3:0]  cfg_guard_cells,
     input wire [4:0]  cfg_train_cells,
     input wire [ALPHA_WIDTH-1:0] cfg_alpha,
+    input wire [ALPHA_WIDTH-1:0] cfg_alpha_soft,   // PR-F: candidate-tier threshold
     input wire [1:0]  cfg_cfar_mode,
     input wire        cfg_cfar_enable,
     input wire [15:0] cfg_simple_threshold,
 
     // ========== DETECTION OUTPUTS ==========
-    output reg        detect_flag,
+    output reg        detect_flag,        // = (detect_class != RP_DETECT_NONE)
+    output reg [`RP_DETECT_CLASS_WIDTH-1:0] detect_class,  // PR-F: NONE/CANDIDATE/CONFIRMED
     output reg        detect_valid,
-    output reg [`RP_RANGE_BIN_WIDTH_MAX-1:0] detect_range,  // 9-bit (50T) / 12-bit (200T)
-    output reg [4:0]  detect_doppler,
+    output reg [`RP_RANGE_BIN_WIDTH_MAX-1:0] detect_range,
+    output reg [DBIN_WIDTH-1:0] detect_doppler,
     output reg [MAG_WIDTH-1:0] detect_magnitude,
-    output reg [MAG_WIDTH-1:0] detect_threshold,
+    output reg [MAG_WIDTH-1:0] detect_threshold,        // confirmed threshold (legacy)
+    output reg [MAG_WIDTH-1:0] detect_threshold_soft,   // PR-F: soft (candidate) threshold
 
     // ========== STATUS ==========
-    output reg [15:0] detect_count,
+    output reg [15:0] detect_count,       // total detections (CONFIRMED only)
+    output reg [15:0] detect_count_cand,  // PR-F: candidate-only counter
     output wire       cfar_busy,
     output reg [7:0]  cfar_status
 );
@@ -143,10 +148,24 @@ module cfar_ca #(
 // ============================================================================
 // INTERNAL PARAMETERS
 // ============================================================================
-localparam TOTAL_CELLS = NUM_RANGE_BINS * NUM_DOPPLER_BINS;
-localparam ADDR_WIDTH  = `RP_CFAR_MAG_ADDR_W;          // 14 (50T) / 17 (200T)
-localparam COL_BITS    = 5;
-localparam ROW_BITS    = `RP_RANGE_BIN_WIDTH_MAX;      // 9 (50T) / 12 (200T)
+// Doppler-axis index width: enough bits to count 0..NUM_DOPPLER_BINS-1.
+// Packed BRAM addressing pads to the next power of two so the {range,doppler}
+// concatenation lands in a contiguous block per range bin (works for both
+// NUM_DOPPLER_BINS=32, legacy power-of-two, and NUM_DOPPLER_BINS=48, PR-F).
+function integer clog2;
+    input integer v;
+    integer i;
+    begin
+        clog2 = 0;
+        for (i = v - 1; i > 0; i = i >> 1) clog2 = clog2 + 1;
+    end
+endfunction
+localparam DBIN_INDEX_BITS  = clog2(NUM_DOPPLER_BINS);                // 5 (NUM=32) / 6 (NUM=48)
+localparam DOPPLER_PAD      = (1 << DBIN_INDEX_BITS);                 // 32 / 64
+localparam TOTAL_CELLS      = NUM_RANGE_BINS * DOPPLER_PAD;           // 16K (50T legacy) / 32K (50T PR-F)
+localparam ADDR_WIDTH       = `RP_RANGE_BIN_WIDTH_MAX + DBIN_INDEX_BITS;
+localparam COL_BITS         = DBIN_INDEX_BITS;                        // address-axis col counter
+localparam ROW_BITS         = `RP_RANGE_BIN_WIDTH_MAX;                // 9 (50T) / 12 (200T)
 localparam SUM_WIDTH   = MAG_WIDTH + ROW_BITS;         // 26 (50T) / 29 (200T)
 localparam PROD_WIDTH  = SUM_WIDTH + ALPHA_WIDTH;  // 34 bits
 localparam ALPHA_FRAC_BITS = 4;  // Q4.4
@@ -213,13 +232,15 @@ reg [COL_BITS-1:0]  col_idx;
 reg [3:0]  r_guard;
 reg [4:0]  r_train;
 reg [ALPHA_WIDTH-1:0] r_alpha;
+reg [ALPHA_WIDTH-1:0] r_alpha_soft;     // PR-F: candidate threshold multiplier
 reg [1:0]  r_mode;
 reg        r_enable;
 reg [15:0] r_simple_thr;
 
 // Threshold pipeline registers
 reg [SUM_WIDTH-1:0]  noise_sum_reg;   // Stage 1: registered noise_sum_comb output
-reg [PROD_WIDTH-1:0] noise_product;   // Stage 2: alpha * noise_sum_reg
+reg [PROD_WIDTH-1:0] noise_product;        // Stage 2: alpha      * noise_sum_reg
+reg [PROD_WIDTH-1:0] noise_product_soft;   // PR-F:    alpha_soft * noise_sum_reg
 reg [MAG_WIDTH-1:0]  adaptive_thr;
 
 // Init counter for computing initial lagging sum
@@ -324,12 +345,15 @@ always @(posedge clk or negedge reset_n) begin
     if (!reset_n) begin
         state          <= ST_IDLE;
         detect_flag    <= 1'b0;
+        detect_class   <= `RP_DETECT_NONE;
         detect_valid   <= 1'b0;
         detect_range   <= {ROW_BITS{1'b0}};
-        detect_doppler <= 5'd0;
+        detect_doppler <= {DBIN_WIDTH{1'b0}};
         detect_magnitude <= {MAG_WIDTH{1'b0}};
         detect_threshold <= {MAG_WIDTH{1'b0}};
+        detect_threshold_soft <= {MAG_WIDTH{1'b0}};
         detect_count   <= 16'd0;
+        detect_count_cand <= 16'd0;
         cfar_status    <= 8'd0;
         mag_we         <= 1'b0;
         mag_waddr      <= {ADDR_WIDTH{1'b0}};
@@ -345,6 +369,7 @@ always @(posedge clk or negedge reset_n) begin
         init_idx       <= 0;
         noise_sum_reg  <= 0;
         noise_product  <= 0;
+        noise_product_soft <= 0;
         adaptive_thr   <= 0;
         lead_add_val_r <= 0;
         lead_rem_val_r <= 0;
@@ -356,7 +381,8 @@ always @(posedge clk or negedge reset_n) begin
         lag_add_valid_r  <= 0;
         r_guard        <= 4'd2;
         r_train        <= 5'd8;
-        r_alpha        <= 8'h30;
+        r_alpha        <= `RP_DEF_CFAR_ALPHA;
+        r_alpha_soft   <= `RP_DEF_CFAR_ALPHA_SOFT;
         r_mode         <= 2'b00;
         r_enable       <= 1'b0;
         r_simple_thr   <= 16'd10000;
@@ -364,6 +390,7 @@ always @(posedge clk or negedge reset_n) begin
         // Defaults: clear one-shot outputs
         detect_valid <= 1'b0;
         detect_flag  <= 1'b0;
+        detect_class <= `RP_DETECT_NONE;
         mag_we       <= 1'b0;
 
         case (state)
@@ -374,27 +401,35 @@ always @(posedge clk or negedge reset_n) begin
             cfar_status <= 8'd0;
 
             if (doppler_valid) begin
-                // Capture configuration at frame start
+                // Capture configuration at frame start. PR-F: per-frame counters
+                // reset to 0 here (matches the AUDIT-C6 fix in ST_DONE for the
+                // legacy detect_count).
                 r_guard      <= cfg_guard_cells;
                 r_train      <= (cfg_train_cells == 0) ? 5'd1 : cfg_train_cells;
                 r_alpha      <= cfg_alpha;
+                r_alpha_soft <= cfg_alpha_soft;
                 r_mode       <= cfg_cfar_mode;
                 r_enable     <= cfg_cfar_enable;
                 r_simple_thr <= cfg_simple_threshold;
 
                 // Buffer first sample
                 mag_we    <= 1'b1;
-                mag_waddr <= {range_bin_in, doppler_bin_in};
+                mag_waddr <= {range_bin_in, doppler_bin_in[DBIN_INDEX_BITS-1:0]};
                 mag_wdata <= cur_mag;
 
-                // Simple threshold pass-through when CFAR disabled
+                // Simple threshold pass-through when CFAR disabled.
+                // Without an adaptive estimate we can't form a soft tier, so
+                // detect_class collapses to NONE/CONFIRMED on the simple thr.
                 if (!cfg_cfar_enable) begin
                     detect_flag  <= (cur_mag > {1'b0, cfg_simple_threshold});
+                    detect_class <= (cur_mag > {1'b0, cfg_simple_threshold})
+                                    ? `RP_DETECT_CONFIRMED : `RP_DETECT_NONE;
                     detect_valid <= 1'b1;
                     detect_range     <= range_bin_in;
                     detect_doppler   <= doppler_bin_in;
                     detect_magnitude <= cur_mag;
                     detect_threshold <= {1'b0, cfg_simple_threshold};
+                    detect_threshold_soft <= {1'b0, cfg_simple_threshold};
                     if (cur_mag > {1'b0, cfg_simple_threshold})
                         detect_count <= detect_count + 1;
                 end
@@ -411,16 +446,19 @@ always @(posedge clk or negedge reset_n) begin
 
             if (doppler_valid) begin
                 mag_we    <= 1'b1;
-                mag_waddr <= {range_bin_in, doppler_bin_in};
+                mag_waddr <= {range_bin_in, doppler_bin_in[DBIN_INDEX_BITS-1:0]};
                 mag_wdata <= cur_mag;
 
                 if (!r_enable) begin
                     detect_flag  <= (cur_mag > {1'b0, r_simple_thr});
+                    detect_class <= (cur_mag > {1'b0, r_simple_thr})
+                                    ? `RP_DETECT_CONFIRMED : `RP_DETECT_NONE;
                     detect_valid <= 1'b1;
                     detect_range     <= range_bin_in;
                     detect_doppler   <= doppler_bin_in;
                     detect_magnitude <= cur_mag;
                     detect_threshold <= {1'b0, r_simple_thr};
+                    detect_threshold_soft <= {1'b0, r_simple_thr};
                     if (cur_mag > {1'b0, r_simple_thr})
                         detect_count <= detect_count + 1;
                 end
@@ -430,7 +468,7 @@ always @(posedge clk or negedge reset_n) begin
                 if (r_enable) begin
                     col_idx      <= 0;
                     col_load_idx <= 0;
-                    mag_raddr    <= {{ROW_BITS{1'b0}}, 5'd0};
+                    mag_raddr    <= {{ROW_BITS{1'b0}}, {COL_BITS{1'b0}}};
                     state        <= ST_COL_LOAD;
                 end else begin
                     state <= ST_DONE;
@@ -531,7 +569,9 @@ always @(posedge clk or negedge reset_n) begin
         ST_CFAR_MUL: begin
             cfar_status <= {4'd4, 1'b1, col_idx[2:0]};
 
-            noise_product <= r_alpha * noise_sum_reg;
+            // Two parallel multiplies — each maps to a single DSP48 slice.
+            noise_product      <= r_alpha      * noise_sum_reg;   // confirmed tier
+            noise_product_soft <= r_alpha_soft * noise_sum_reg;   // candidate tier (PR-F)
             state <= ST_CFAR_CMP;
         end
 
@@ -554,19 +594,39 @@ always @(posedge clk or negedge reset_n) begin
             detect_doppler   <= col_idx;
             detect_valid     <= 1'b1;
 
-            // Compare: threshold computed this cycle from noise_product
+            // Compare: confirm + soft thresholds computed this cycle from
+            // noise_product / noise_product_soft. detect_class encodes the
+            // tier (NONE / CANDIDATE / CONFIRMED) so downstream can re-cue
+            // CANDIDATEs and track CONFIRMEDs.
             begin : threshold_compare
                 reg [MAG_WIDTH-1:0] thr_val;
+                reg [MAG_WIDTH-1:0] thr_val_soft;
+                reg [MAG_WIDTH-1:0] cur_val;
+
                 if (noise_product[PROD_WIDTH-1:ALPHA_FRAC_BITS+MAG_WIDTH] != 0)
                     thr_val = {MAG_WIDTH{1'b1}};
                 else
                     thr_val = noise_product[ALPHA_FRAC_BITS +: MAG_WIDTH];
 
-                detect_threshold <= thr_val;
+                if (noise_product_soft[PROD_WIDTH-1:ALPHA_FRAC_BITS+MAG_WIDTH] != 0)
+                    thr_val_soft = {MAG_WIDTH{1'b1}};
+                else
+                    thr_val_soft = noise_product_soft[ALPHA_FRAC_BITS +: MAG_WIDTH];
 
-                if (col_buf[cut_idx[ROW_BITS-1:0]] > thr_val) begin
+                detect_threshold      <= thr_val;
+                detect_threshold_soft <= thr_val_soft;
+
+                cur_val = col_buf[cut_idx[ROW_BITS-1:0]];
+
+                if (cur_val > thr_val) begin
                     detect_flag  <= 1'b1;
+                    detect_class <= `RP_DETECT_CONFIRMED;
                     detect_count <= detect_count + 1;
+                end else if (cur_val > thr_val_soft) begin
+                    // Above soft, below confirm — host re-cues this cell.
+                    detect_flag       <= 1'b1;
+                    detect_class      <= `RP_DETECT_CANDIDATE;
+                    detect_count_cand <= detect_count_cand + 1;
                 end
             end
 
@@ -592,7 +652,7 @@ always @(posedge clk or negedge reset_n) begin
             if (col_idx < NUM_DOPPLER_BINS - 1) begin
                 col_idx      <= col_idx + 1;
                 col_load_idx <= 0;
-                mag_raddr    <= {{ROW_BITS{1'b0}}, col_idx + 5'd1};
+                mag_raddr    <= {{ROW_BITS{1'b0}}, col_idx + {{(COL_BITS-1){1'b0}}, 1'b1}};
                 state        <= ST_COL_LOAD;
             end else begin
                 state <= ST_DONE;
@@ -613,10 +673,12 @@ always @(posedge clk or negedge reset_n) begin
             state <= ST_IDLE;
 
             `ifdef SIMULATION
-            $display("[CFAR] Frame complete: %0d frame detections", detect_count);
+            $display("[CFAR] Frame complete: %0d confirmed, %0d candidates",
+                     detect_count, detect_count_cand);
             `endif
 
-            detect_count <= 16'd0;
+            detect_count      <= 16'd0;
+            detect_count_cand <= 16'd0;
         end
 
         default: state <= ST_IDLE;

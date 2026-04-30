@@ -126,7 +126,7 @@ module radar_system_top (
     // Doppler processing outputs (for debugging)
     output wire [31:0] dbg_doppler_data,
     output wire dbg_doppler_valid,
-    output wire [4:0] dbg_doppler_bin,
+    output wire [`RP_DOPPLER_BIN_WIDTH-1:0] dbg_doppler_bin,
     output wire [`RP_RANGE_BIN_WIDTH_MAX-1:0] dbg_range_bin,
     
     // System status
@@ -186,7 +186,7 @@ wire       sched_frame_pulse;
 // Receiver internal signals
 wire [31:0] rx_doppler_output;
 wire rx_doppler_valid;
-wire [4:0] rx_doppler_bin;
+wire [`RP_DOPPLER_BIN_WIDTH-1:0] rx_doppler_bin;
 wire [`RP_RANGE_BIN_WIDTH_MAX-1:0] rx_range_bin;
 wire [31:0] rx_range_profile;
 wire rx_range_valid;
@@ -273,7 +273,7 @@ reg        host_status_request;       // Opcode 0xFF (self-clearing pulse)
 // Doppler path (16 long + 16 short). If host sets chirps_per_elev to a
 // different value, Doppler accumulation is corrupted. Clamp at command decode
 // and flag the mismatch so the host knows.
-localparam DOPPLER_FRAME_CHIRPS = 32; // Total chirps per Doppler frame
+localparam DOPPLER_FRAME_CHIRPS = `RP_CHIRPS_PER_FRAME; // 48 (PR-F); was 32
 reg        chirps_mismatch_error;     // Set if host tried to set chirps != FFT size
 
 // Range-mode register (opcode 0x20)
@@ -288,6 +288,8 @@ reg [1:0]  host_range_mode;
 reg [3:0]  host_cfar_guard;       // Opcode 0x21: guard cells per side (0..8)
 reg [4:0]  host_cfar_train;       // Opcode 0x22: training cells per side (1..16)
 reg [7:0]  host_cfar_alpha;       // Opcode 0x23: threshold multiplier (Q4.4)
+reg [7:0]  host_cfar_alpha_soft;  // PR-F: soft / candidate-tier multiplier (Q4.4).
+                                  // USB opcode mapping deferred to PR-G (planned 0x28).
 reg [1:0]  host_cfar_mode;        // Opcode 0x24: 00=CA, 01=GO, 10=SO
 reg        host_cfar_enable;      // Opcode 0x25: 1=CFAR, 0=simple threshold
 
@@ -650,17 +652,16 @@ assign rx_doppler_data_valid = rx_doppler_valid;
 // ============================================================================
 // DC NOTCH FILTER (post-Doppler-FFT, pre-CFAR)
 // ============================================================================
-// Zeros out Doppler bins within ±host_dc_notch_width of DC for BOTH
-// sub-frames in the dual 16-pt FFT architecture.
-// doppler_bin[4:0] = {sub_frame, bin[3:0]}:
-//   Sub-frame 0: bins 0-15,  DC = bin 0,  wrap = bin 15
+// Zeros out Doppler bins within ±host_dc_notch_width of DC for ALL
+// 16-pt sub-frames in the chirp-v2 architecture (3 sub-frames in production).
+// doppler_bin[5:0] = {sub_frame[1:0], bin[3:0]}:
+//   Sub-frame 0: bins  0-15, DC = bin  0, wrap = bin 15
 //   Sub-frame 1: bins 16-31, DC = bin 16, wrap = bin 31
-// notch_width=1 → zero bins {0,16}. notch_width=2 → zero bins
-// {0,1,15,16,17,31}. etc.
-// When host_dc_notch_width=0: pass-through (no zeroing).
+//   Sub-frame 2: bins 32-47, DC = bin 32, wrap = bin 47
+// The DC test ignores the sub-frame field and gates on the 4-bit per-FFT bin.
 
 wire dc_notch_active;
-wire [4:0] dop_bin_unsigned = rx_doppler_bin;
+wire [`RP_DOPPLER_BIN_WIDTH-1:0] dop_bin_unsigned = rx_doppler_bin;
 wire [3:0] bin_within_sf = dop_bin_unsigned[3:0];
 assign dc_notch_active = (host_dc_notch_width != 3'd0) &&
                           (bin_within_sf < {1'b0, host_dc_notch_width} ||
@@ -669,8 +670,8 @@ assign dc_notch_active = (host_dc_notch_width != 3'd0) &&
 // Notched Doppler data: zero I/Q when in notch zone, pass through otherwise
 wire [31:0] notched_doppler_data  = dc_notch_active ? 32'd0 : rx_doppler_output;
 wire        notched_doppler_valid = rx_doppler_valid;
-wire [4:0]  notched_doppler_bin   = rx_doppler_bin;
-wire [`RP_RANGE_BIN_WIDTH_MAX-1:0]  notched_range_bin     = rx_range_bin;
+wire [`RP_DOPPLER_BIN_WIDTH-1:0]  notched_doppler_bin = rx_doppler_bin;
+wire [`RP_RANGE_BIN_WIDTH_MAX-1:0]  notched_range_bin = rx_range_bin;
 
 // ============================================================================
 // CFAR DETECTOR (replaces simple threshold detector)
@@ -680,12 +681,15 @@ wire [`RP_RANGE_BIN_WIDTH_MAX-1:0]  notched_range_bin     = rx_range_bin;
 // See cfar_ca.v for architecture details.
 
 wire cfar_detect_flag;
+wire [`RP_DETECT_CLASS_WIDTH-1:0] cfar_detect_class;
 wire cfar_detect_valid;
 wire [`RP_RANGE_BIN_WIDTH_MAX-1:0]  cfar_detect_range;
-wire [4:0]  cfar_detect_doppler;
+wire [`RP_DOPPLER_BIN_WIDTH-1:0]    cfar_detect_doppler;
 wire [16:0] cfar_detect_magnitude;
 wire [16:0] cfar_detect_threshold;
+wire [16:0] cfar_detect_threshold_soft;
 wire [15:0] cfar_detect_count;
+wire [15:0] cfar_detect_count_cand;
 wire        cfar_busy_w;
 wire [7:0]  cfar_status_w;
 
@@ -704,20 +708,24 @@ cfar_ca cfar_inst (
     .cfg_guard_cells(host_cfar_guard),
     .cfg_train_cells(host_cfar_train),
     .cfg_alpha(host_cfar_alpha),
+    .cfg_alpha_soft(host_cfar_alpha_soft),
     .cfg_cfar_mode(host_cfar_mode),
     .cfg_cfar_enable(host_cfar_enable),
     .cfg_simple_threshold(host_detect_threshold),
 
     // Detection outputs
     .detect_flag(cfar_detect_flag),
+    .detect_class(cfar_detect_class),
     .detect_valid(cfar_detect_valid),
     .detect_range(cfar_detect_range),
     .detect_doppler(cfar_detect_doppler),
     .detect_magnitude(cfar_detect_magnitude),
     .detect_threshold(cfar_detect_threshold),
+    .detect_threshold_soft(cfar_detect_threshold_soft),
 
     // Status
     .detect_count(cfar_detect_count),
+    .detect_count_cand(cfar_detect_count_cand),
     .cfar_busy(cfar_busy_w),
     .cfar_status(cfar_status_w)
 );
@@ -1032,7 +1040,8 @@ always @(posedge clk_100m_buf or negedge sys_reset_n) begin
         // CFAR defaults (disabled by default — backward-compatible)
         host_cfar_guard         <= 4'd2;      // 2 guard cells each side
         host_cfar_train         <= 5'd8;      // 8 training cells each side
-        host_cfar_alpha         <= 8'h30;     // alpha=3.0 (Q4.4)
+        host_cfar_alpha         <= `RP_DEF_CFAR_ALPHA;        // 3.0 (Q4.4)
+        host_cfar_alpha_soft    <= `RP_DEF_CFAR_ALPHA_SOFT;   // 1.5 (Q4.4) — PR-F
         host_cfar_mode          <= 2'b00;     // CA-CFAR
         host_cfar_enable        <= 1'b0;      // Disabled (simple threshold)
         // Ground clutter removal defaults (disabled — backward-compatible)

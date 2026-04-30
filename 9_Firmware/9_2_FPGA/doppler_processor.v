@@ -1,31 +1,29 @@
 `timescale 1ns / 1ps
 
 // ============================================================================
-// doppler_processor.v — Staggered-PRF Doppler Processor (CORRECTED)
+// doppler_processor.v — Multi-subframe Doppler Processor (chirp-v2 PR-F)
 // ============================================================================
 //
 // ARCHITECTURE:
-//   This module implements dual 16-point FFTs for the AERIS-10 staggered-PRF
-//   waveform. The radar transmits 16 long-PRI chirps followed by 16 short-PRI
-//   chirps per frame (32 total). Rather than a single 32-point FFT over the
-//   non-uniformly sampled frame (which is signal-processing invalid), this
-//   module processes each sub-frame independently:
+//   Processes NUM_SUBFRAMES = CHIRPS_PER_FRAME / CHIRPS_PER_SUBFRAME independent
+//   16-point FFTs per range bin. The chirp-v2 production build runs three
+//   sub-frames (SHORT, MEDIUM, LONG) at 16 chirps each = 48 chirps per frame:
 //
-//     Sub-frame 0 (long PRI):  chirps 0..15  → 16-pt windowed FFT
-//     Sub-frame 1 (short PRI): chirps 16..31 → 16-pt windowed FFT
+//     Sub-frame 0: chirps  0..15 → 16-pt windowed FFT  (SHORT in chirp-v2)
+//     Sub-frame 1: chirps 16..31 → 16-pt windowed FFT  (MEDIUM in chirp-v2)
+//     Sub-frame 2: chirps 32..47 → 16-pt windowed FFT  (LONG  in chirp-v2)
 //
-//   Each sub-frame produces 16 Doppler bins per range bin. The outputs are
-//   tagged with a sub_frame bit and the 4-bit bin index is packed into the
-//   existing 5-bit doppler_bin port as {sub_frame, bin[3:0]}.
+//   Each sub-frame produces 16 Doppler bins per range bin. Outputs are tagged
+//   with the 2-bit sub_frame index and the 4-bit bin index is packed into the
+//   6-bit doppler_bin port as {sub_frame[1:0], bin[3:0]}.
 //
-//   This architecture enables downstream staggered-PRF ambiguity resolution:
-//   the same target velocity maps to DIFFERENT Doppler bins at different PRIs,
-//   and comparing the two sub-frame results resolves velocity ambiguity.
+//   Legacy 2-subframe golden-vector tests (tb_doppler_realdata,
+//   tb_fullchain_realdata) override CHIRPS_PER_FRAME=32 + CHIRPS_PER_SUBFRAME=16
+//   to make NUM_SUBFRAMES=2; the FSM generalises cleanly. doppler_bin still
+//   reports 6 bits there with the high bit always zero.
 //
-// INTERFACE COMPATIBILITY:
-//   The port list is a superset of the original module. Existing instantiations
-//   that don't connect `sub_frame` will still work. The FORMAL ports are
-//   retained. CHIRPS_PER_FRAME must be 32 (16 per sub-frame).
+//   Staggered-PRF ambiguity resolution downstream picks the matching Doppler
+//   bin from the SHORT vs MEDIUM vs LONG sub-frame to resolve velocity.
 //
 // WINDOW:
 //   16-point Hamming window (Q15), symmetric. Computed as:
@@ -46,7 +44,7 @@
 module doppler_processor_optimized #(
     parameter DOPPLER_FFT_SIZE   = `RP_DOPPLER_FFT_SIZE,    // 16
     parameter RANGE_BINS         = `RP_MAX_OUTPUT_BINS,     // 512 (50T) / 4096 (200T)
-    parameter CHIRPS_PER_FRAME   = `RP_CHIRPS_PER_FRAME,    // 32
+    parameter CHIRPS_PER_FRAME   = `RP_CHIRPS_PER_FRAME,    // 48 (PR-F); legacy TBs override to 32
     parameter CHIRPS_PER_SUBFRAME = `RP_CHIRPS_PER_SUBFRAME, // 16
     parameter WINDOW_TYPE        = 0,      // 0=Hamming, 1=Rectangular
     parameter DATA_WIDTH         = `RP_DATA_WIDTH           // 16
@@ -58,9 +56,9 @@ module doppler_processor_optimized #(
     input wire new_chirp_frame,
     output reg [31:0] doppler_output,
     output reg doppler_valid,
-    output reg [4:0] doppler_bin,      // {sub_frame, bin[3:0]}
-    output reg [`RP_RANGE_BIN_WIDTH_MAX-1:0] range_bin,  // 9-bit (50T) / 12-bit (200T)
-    output reg sub_frame,              // 0=long PRI, 1=short PRI
+    output reg [`RP_DOPPLER_BIN_WIDTH-1:0] doppler_bin,    // 6-bit {sub_frame[1:0], bin[3:0]}
+    output reg [`RP_RANGE_BIN_WIDTH_MAX-1:0] range_bin,    // 9-bit (50T) / 12-bit (200T)
+    output reg [`RP_SUBFRAME_ID_WIDTH-1:0] sub_frame,      // 2-bit subframe index
     output wire processing_active,
     output wire frame_complete,
     output reg [3:0] status
@@ -71,15 +69,20 @@ module doppler_processor_optimized #(
     output wire [`RP_DOPPLER_MEM_ADDR_W-1:0] fv_mem_write_addr,
     output wire [`RP_DOPPLER_MEM_ADDR_W-1:0] fv_mem_read_addr,
     output wire [`RP_RANGE_BIN_WIDTH_MAX-1:0]     fv_write_range_bin,
-    output wire [4:0]  fv_write_chirp_index,
+    output wire [5:0]  fv_write_chirp_index,
     output wire [`RP_RANGE_BIN_WIDTH_MAX-1:0]     fv_read_range_bin,
-    output wire [4:0]  fv_read_doppler_index,
+    output wire [5:0]  fv_read_doppler_index,
     output wire [9:0]  fv_processing_timeout,
     output wire        fv_frame_buffer_full,
     output wire        fv_mem_we,
     output wire [`RP_DOPPLER_MEM_ADDR_W-1:0] fv_mem_waddr_r
 `endif
 );
+
+// Derived: number of sub-frames in the current configuration. Production
+// build = 3 (SHORT/MEDIUM/LONG @ 16 chirps each = 48 frame). Legacy TBs
+// override CHIRPS_PER_FRAME=32 to get NUM_SUBFRAMES=2 for golden compat.
+localparam NUM_SUBFRAMES = CHIRPS_PER_FRAME / CHIRPS_PER_SUBFRAME;
 
 // ==============================================
 // Window Coefficients — 16-point Hamming (Q15)
@@ -127,9 +130,9 @@ localparam MEM_DEPTH = RANGE_BINS * CHIRPS_PER_FRAME;
 // Control Registers
 // ==============================================
 reg [`RP_RANGE_BIN_WIDTH_MAX-1:0] write_range_bin;
-reg [4:0] write_chirp_index;
+reg [5:0] write_chirp_index;          // 6-bit: 0..47 (PR-F)
 reg [`RP_RANGE_BIN_WIDTH_MAX-1:0] read_range_bin;
-reg [4:0] read_doppler_index;
+reg [5:0] read_doppler_index;         // 6-bit (PR-F)
 reg frame_buffer_full;
 reg [9:0] chirps_received;
 reg [1:0] chirp_state;
@@ -146,7 +149,7 @@ reg [1:0] chirp_state;
 reg frame_armed;
 
 // Sub-frame tracking
-reg current_sub_frame;   // 0=processing long, 1=processing short
+reg [`RP_SUBFRAME_ID_WIDTH-1:0] current_sub_frame;  // 2-bit (PR-F): 0..NUM_SUBFRAMES-1
 
 // ==============================================
 // FFT Interface
@@ -365,20 +368,17 @@ always @(posedge clk or negedge reset_n) begin
             end
             
             S_OUTPUT: begin
-                if (current_sub_frame == 0) begin
-                    // Just finished long PRI sub-frame — now do short PRI
-                    current_sub_frame <= 1;
+                if (current_sub_frame < NUM_SUBFRAMES - 1) begin
+                    // Advance to next sub-frame; same range bin, next FFT
+                    current_sub_frame <= current_sub_frame + 1;
                     fft_sample_counter <= 0;
                     state <= S_PRE_READ;
-                    // read_range_bin stays the same, read_doppler_index
-                    // will be set to CHIRPS_PER_SUBFRAME in Block 2
                 end else begin
-                    // Finished both sub-frames for this range bin
+                    // Finished all NUM_SUBFRAMES for this range bin
                     current_sub_frame <= 0;
                     if (read_range_bin < RANGE_BINS - 1) begin
                         fft_sample_counter <= 0;
                         state <= S_PRE_READ;
-                        // read_range_bin incremented in Block 2
                     end else begin
                         state <= S_IDLE;
                         frame_buffer_full <= 0;
@@ -445,12 +445,9 @@ always @(posedge clk) begin
             end
             
             S_PRE_READ: begin
-                // Set read_doppler_index to first chirp of current sub-frame + 1
-                // (because address is presented this cycle, data arrives next)
-                if (current_sub_frame == 0)
-                    read_doppler_index <= 1;  // Long PRI: chirps 0..15
-                else
-                    read_doppler_index <= CHIRPS_PER_SUBFRAME + 1;  // Short PRI: chirps 16..31
+                // First chirp of current sub-frame + 1 (address-then-data pipe).
+                // Generalised: chirp_base = current_sub_frame * CHIRPS_PER_SUBFRAME.
+                read_doppler_index <= current_sub_frame * CHIRPS_PER_SUBFRAME + 6'd1;
 
                 // BREG priming: window coeff for sample 0
                 window_val_reg <= $signed(window_coeff[0]);
@@ -463,13 +460,7 @@ always @(posedge clk) begin
                     mult_q_raw <= $signed(mem_rdata_q) * window_val_reg;
                     window_val_reg <= $signed(window_coeff[1]);
                     // Advance to chirp base+2
-                    if (current_sub_frame == 0)
-                        read_doppler_index <= (2 < CHIRPS_PER_SUBFRAME) ? 2
-                                              : CHIRPS_PER_SUBFRAME - 1;
-                    else
-                        read_doppler_index <= (CHIRPS_PER_SUBFRAME + 2 < CHIRPS_PER_FRAME)
-                                              ? CHIRPS_PER_SUBFRAME + 2
-                                              : CHIRPS_PER_FRAME - 1;
+                    read_doppler_index <= current_sub_frame * CHIRPS_PER_SUBFRAME + 6'd2;
                 end else if (fft_sample_counter == 1) begin
                     mult_i <= mult_i_raw;
                     mult_q <= mult_q_raw;
@@ -478,14 +469,7 @@ always @(posedge clk) begin
                     if (2 < CHIRPS_PER_SUBFRAME)
                         window_val_reg <= $signed(window_coeff[2]);
                     // Advance to chirp base+3
-                    begin : advance_chirp3
-                        reg [4:0] next_chirp;
-                        next_chirp = (current_sub_frame == 0) ? 3 : CHIRPS_PER_SUBFRAME + 3;
-                        if (next_chirp < CHIRPS_PER_FRAME)
-                            read_doppler_index <= next_chirp;
-                        else
-                            read_doppler_index <= CHIRPS_PER_FRAME - 1;
-                    end
+                    read_doppler_index <= current_sub_frame * CHIRPS_PER_SUBFRAME + 6'd3;
                 end else if (fft_sample_counter <= CHIRPS_PER_SUBFRAME + 1) begin
                     // Steady state
                     fft_input_i <= (mult_i + (1 << 14)) >>> 15;
@@ -503,39 +487,34 @@ always @(posedge clk) begin
                             if (win_idx < CHIRPS_PER_SUBFRAME)
                                 window_val_reg <= $signed(window_coeff[win_idx]);
                         end
-                        // Advance BRAM read
-                        begin : advance_bram
-                            reg [4:0] chirp_offset;
-                            reg [4:0] chirp_base;
-                            chirp_offset = fft_sample_counter[3:0] + 2;
-                            chirp_base = (current_sub_frame == 0) ? 0 : CHIRPS_PER_SUBFRAME;
-                            if (chirp_base + chirp_offset < CHIRPS_PER_FRAME)
-                                read_doppler_index <= chirp_base + chirp_offset;
-                            else
-                                read_doppler_index <= CHIRPS_PER_FRAME - 1;
-                        end
+                        // Advance BRAM read: chirp_base + (counter + 2).
+                        // For NUM_SUBFRAMES * CHIRPS_PER_SUBFRAME = CHIRPS_PER_FRAME
+                        // and counter <= CHIRPS_PER_SUBFRAME-1, chirp_base+offset
+                        // is bounded by CHIRPS_PER_FRAME so no clamp is needed.
+                        read_doppler_index <= current_sub_frame * CHIRPS_PER_SUBFRAME
+                                              + {2'd0, fft_sample_counter[3:0]} + 6'd2;
                     end
 
                     if (fft_sample_counter == CHIRPS_PER_SUBFRAME + 1) begin
-                        // Reset read index for potential next operation
-                        if (current_sub_frame == 0)
-                            read_doppler_index <= CHIRPS_PER_SUBFRAME;  // Ready for short sub-frame
+                        // Reset read index for the next sub-frame (or wrap to 0
+                        // when we've finished all NUM_SUBFRAMES).
+                        if (current_sub_frame < NUM_SUBFRAMES - 1)
+                            read_doppler_index <= (current_sub_frame + 6'd1) * CHIRPS_PER_SUBFRAME;
                         else
-                            read_doppler_index <= 0;
+                            read_doppler_index <= 6'd0;
                     end
                 end
             end
 
             S_OUTPUT: begin
-                if (current_sub_frame == 0) begin
-                    // Transitioning to short PRI sub-frame
-                    // Set read_doppler_index to start of short sub-frame
-                    read_doppler_index <= CHIRPS_PER_SUBFRAME;
+                if (current_sub_frame < NUM_SUBFRAMES - 1) begin
+                    // Transitioning to next sub-frame for the same range bin.
+                    read_doppler_index <= (current_sub_frame + 6'd1) * CHIRPS_PER_SUBFRAME;
                 end else begin
-                    // Both sub-frames done
+                    // All sub-frames done for this range bin
                     if (read_range_bin < RANGE_BINS - 1) begin
                         read_range_bin     <= read_range_bin + 1;
-                        read_doppler_index <= 0;  // Next range bin starts with long sub-frame
+                        read_doppler_index <= 6'd0;  // Next range bin starts with sub-frame 0
                     end
                 end
             end
