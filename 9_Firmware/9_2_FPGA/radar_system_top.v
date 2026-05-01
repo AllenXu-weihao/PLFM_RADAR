@@ -197,6 +197,9 @@ wire [15:0] rx_doppler_imag;
 wire rx_doppler_data_valid;
 reg rx_detect_flag;       // Threshold detection result (was rx_cfar_detection)
 reg rx_detect_valid;      // Detection valid pulse (was rx_cfar_valid)
+// PR-G: 2-bit class register (registered alongside detect_flag for the same
+// CDC-clean handoff to usb_data_interface_ft2232h). Encoding per RP_DETECT_*.
+reg [`RP_DETECT_CLASS_WIDTH-1:0] rx_detect_class;
 
 // Frame-complete signal from Doppler processor (for CFAR)
 wire rx_frame_complete;
@@ -230,8 +233,9 @@ wire usb_range_valid;
 wire [15:0] usb_doppler_real;
 wire [15:0] usb_doppler_imag;
 wire usb_doppler_valid;
-wire usb_detect_flag;     // (was usb_cfar_detection)
+wire usb_detect_flag;     // (was usb_cfar_detection) — FT601 legacy 1-bit path
 wire usb_detect_valid;    // (was usb_cfar_valid)
+wire [`RP_DETECT_CLASS_WIDTH-1:0] usb_detect_class;  // PR-G: 2-bit class for FT2232H bulk frame v2
 
 // System status
 reg [3:0] status_reg;
@@ -263,8 +267,10 @@ reg [3:0]  host_gain_shift;
 reg [15:0] host_long_chirp_cycles;    // Opcode 0x10 (default 3000)
 reg [15:0] host_long_listen_cycles;   // Opcode 0x11 (default 13700)
 reg [15:0] host_guard_cycles;         // Opcode 0x12 (default 17540)
-reg [15:0] host_short_chirp_cycles;   // Opcode 0x13 (default 50)
-reg [15:0] host_short_listen_cycles;  // Opcode 0x14 (default 17450)
+reg [15:0] host_short_chirp_cycles;   // Opcode 0x13 (default 100, V2)
+reg [15:0] host_short_listen_cycles;  // Opcode 0x14 (default 17400, V2)
+reg [15:0] host_medium_chirp_cycles;  // Opcode 0x17 (default 500, PR-G G2)
+reg [15:0] host_medium_listen_cycles; // Opcode 0x18 (default 17000, PR-G G2)
 reg [5:0]  host_chirps_per_elev;      // Opcode 0x15 (default 32)
 reg        host_status_request;       // Opcode 0xFF (self-clearing pulse)
 
@@ -592,6 +598,9 @@ radar_receiver_final rx_inst (
     .host_guard_cycles(host_guard_cycles),
     .host_short_chirp_cycles(host_short_chirp_cycles),
     .host_short_listen_cycles(host_short_listen_cycles),
+    // PR-G G2: MEDIUM ladder timings (was hardcoded to RP_DEF_MEDIUM_*)
+    .host_medium_chirp_cycles(host_medium_chirp_cycles),
+    .host_medium_listen_cycles(host_medium_listen_cycles),
     .host_chirps_per_elev(host_chirps_per_elev),
     // Fix 3: digital gain control
     .host_gain_shift(host_gain_shift),
@@ -689,13 +698,11 @@ wire [16:0] cfar_detect_threshold;
 wire [15:0] cfar_detect_count;
 wire        cfar_busy_w;
 wire [7:0]  cfar_status_w;
-// PR-F note: cfar_ca also drives detect_class[1:0], detect_threshold_soft,
-// detect_count_cand. The soft-tier comparison still feeds detect_flag (which
-// is wired to USB), so the candidate logic is preserved in synth — but the
-// class / soft-thr / cand-count outputs themselves don't go anywhere until
-// PR-G adds the USB opcodes (0x28 alpha_soft + bulk-frame v2). We deliberately
-// leave the cfar_ca output ports unconnected here so they do NOT show up as
-// dangling wires in radar_system_top; PR-G will reattach them.
+// PR-G: 2-class adaptive detection now wired through to the USB bulk frame
+// (detect_class per cell) and status packet (count_cand + threshold_soft).
+wire [`RP_DETECT_CLASS_WIDTH-1:0] cfar_detect_class;        // PR-G: NONE/CAND/CONFIRM
+wire [16:0]                       cfar_detect_threshold_soft; // PR-G: soft (candidate) threshold
+wire [15:0]                       cfar_detect_count_cand;     // PR-G: per-frame candidate count
 
 cfar_ca cfar_inst (
     .clk(clk_100m_buf),
@@ -719,17 +726,17 @@ cfar_ca cfar_inst (
 
     // Detection outputs
     .detect_flag(cfar_detect_flag),
-    .detect_class(),                       // PR-F: routed in PR-G (USB 0x2A read)
+    .detect_class(cfar_detect_class),                       // PR-G: 2-bit dense to USB bulk frame
     .detect_valid(cfar_detect_valid),
     .detect_range(cfar_detect_range),
     .detect_doppler(cfar_detect_doppler),
     .detect_magnitude(cfar_detect_magnitude),
     .detect_threshold(cfar_detect_threshold),
-    .detect_threshold_soft(),              // PR-F: routed in PR-G
+    .detect_threshold_soft(cfar_detect_threshold_soft),     // PR-G: status_words[6][15:0]
 
     // Status
     .detect_count(cfar_detect_count),
-    .detect_count_cand(),                  // PR-F: routed in PR-G (telemetry)
+    .detect_count_cand(cfar_detect_count_cand),             // PR-G: status_words[6][31:16]
     .cfar_busy(cfar_busy_w),
     .cfar_status(cfar_status_w)
 );
@@ -740,9 +747,11 @@ always @(posedge clk_100m_buf or negedge sys_reset_n) begin
     if (!sys_reset_n) begin
         rx_detect_flag  <= 1'b0;
         rx_detect_valid <= 1'b0;
+        rx_detect_class <= `RP_DETECT_NONE;
     end else begin
         rx_detect_flag  <= cfar_detect_flag;
         rx_detect_valid <= cfar_detect_valid;
+        rx_detect_class <= cfar_detect_class;
     end
 end
 
@@ -795,6 +804,7 @@ assign usb_doppler_valid = rx_doppler_valid;
 
 assign usb_detect_flag  = rx_detect_flag;
 assign usb_detect_valid = rx_detect_valid;
+assign usb_detect_class = rx_detect_class;  // PR-G: 2-bit class to FT2232H
 
 // ============================================================================
 // USB DATA INTERFACE INSTANTIATION (parametric: FT601 or FT2232H)
@@ -893,7 +903,7 @@ end else begin : gen_ft2232h
         .doppler_real(usb_doppler_real),
         .doppler_imag(usb_doppler_imag),
         .doppler_valid(usb_doppler_valid),
-        .cfar_detection(usb_detect_flag),
+        .cfar_detect_class(usb_detect_class),  // PR-G: 2-bit class (was 1-bit cfar_detection)
         .cfar_valid(usb_detect_valid),
 
         // Bulk frame protocol inputs
@@ -949,7 +959,12 @@ end else begin : gen_ft2232h
         // AUDIT-S10: control-fault flags exposed in status_words[5][6:5]
         // for host-side observability (paired with gpio_dig7 split)
         .status_range_decim_watchdog(rx_range_decim_watchdog),
-        .status_ddc_cic_fir_overrun(rx_ddc_cic_fir_overrun)
+        .status_ddc_cic_fir_overrun(rx_ddc_cic_fir_overrun),
+
+        // PR-G: 2-tier CFAR telemetry (status_words[6])
+        .status_cfar_alpha_soft(host_cfar_alpha_soft),
+        .status_detect_threshold_soft(cfar_detect_threshold_soft),
+        .status_detect_count_cand(cfar_detect_count_cand)
     );
 
     // FT601 ports unused in FT2232H mode — tie off
@@ -1032,12 +1047,14 @@ always @(posedge clk_100m_buf or negedge sys_reset_n) begin
         host_gain_shift     <= 4'd0;      // Default: pass-through (no gain change)
         // Gap 2: chirp timing defaults (forwarded to chirp_scheduler).
         // SHORT bumped to 100 cycles (1 us) for chirp-v2 SHORT waveform.
-        host_long_chirp_cycles  <= 16'd3000;
-        host_long_listen_cycles <= 16'd13700;
-        host_guard_cycles       <= 16'd17540;
-        host_short_chirp_cycles <= 16'd100;
-        host_short_listen_cycles <= 16'd17400;
-        host_chirps_per_elev    <= 6'd32;
+        host_long_chirp_cycles    <= 16'd`RP_DEF_LONG_CHIRP_CYCLES;
+        host_long_listen_cycles   <= 16'd`RP_DEF_LONG_LISTEN_CYCLES;
+        host_guard_cycles         <= 16'd`RP_DEF_GUARD_CYCLES;
+        host_short_chirp_cycles   <= 16'd`RP_DEF_SHORT_CHIRP_CYCLES_V2;
+        host_short_listen_cycles  <= 16'd`RP_DEF_SHORT_LISTEN_CYCLES_V2;
+        host_medium_chirp_cycles  <= 16'd`RP_DEF_MEDIUM_CHIRP_CYCLES;   // PR-G G2
+        host_medium_listen_cycles <= 16'd`RP_DEF_MEDIUM_LISTEN_CYCLES;  // PR-G G2
+        host_chirps_per_elev      <= 6'd32;
         host_status_request     <= 1'b0;
         chirps_mismatch_error   <= 1'b0;
         host_range_mode         <= 2'b00;     // Default: 3 km mode (all short chirps)
@@ -1074,30 +1091,21 @@ always @(posedge clk_100m_buf or negedge sys_reset_n) begin
                 8'h01: host_radar_mode     <= usb_cmd_value[1:0];
                 8'h02: host_trigger_pulse  <= 1'b1;
                 8'h03: host_detect_threshold <= usb_cmd_value;
-                // AUDIT-C9: stream_control bits [3] (mag_only) and [4]
-                // (sparse_det) are documented in the FT2232H bulk-frame
-                // header but the write FSM does not implement the alternate
-                // encodings yet (see usb_data_interface_ft2232h.v "INERT
-                // FLAGS" note). Force-clamp them to the only encodings the
-                // FSM actually emits so a host write of 0x04 cannot create
-                // a wire-format vs FSM divergence on the production board.
-                8'h04: begin
-                    if (USB_MODE == 1) begin
-                        // FT2232H production: mag_only stuck at 1, sparse_det stuck at 0.
-                        host_stream_control <= {usb_cmd_value[5],
-                                                1'b0,                // sparse_det
-                                                1'b1,                // mag_only
-                                                usb_cmd_value[2:0]}; // stream r/d/c
-                    end else begin
-                        host_stream_control <= usb_cmd_value[5:0];
-                    end
-                end
+                // PR-G: protocol v2 has a single canonical encoding
+                // (Manhattan-mag doppler + 2-bit dense detect). Bits [5:3] of
+                // host_stream_control are RESERVED — host SHOULD write 0, RTL
+                // ignores them. The legacy AUDIT-C9 force-clamp + INERT FLAGS
+                // logic was removed when v1 was retired.
+                8'h04: host_stream_control <= {3'b000, usb_cmd_value[2:0]};
                 // Gap 2: chirp timing configuration
                 8'h10: host_long_chirp_cycles  <= usb_cmd_value;
                 8'h11: host_long_listen_cycles <= usb_cmd_value;
                 8'h12: host_guard_cycles       <= usb_cmd_value;
                 8'h13: host_short_chirp_cycles <= usb_cmd_value;
                 8'h14: host_short_listen_cycles <= usb_cmd_value;
+                // PR-G G2: MEDIUM ladder timings
+                8'h17: host_medium_chirp_cycles  <= usb_cmd_value;
+                8'h18: host_medium_listen_cycles <= usb_cmd_value;
                 8'h15: begin
                     // Fix 4: Clamp chirps_per_elev to the fixed Doppler frame size.
                     // If host requests a different value, clamp and set error flag.
@@ -1130,6 +1138,9 @@ always @(posedge clk_100m_buf or negedge sys_reset_n) begin
                 8'h2A: host_agc_attack         <= usb_cmd_value[3:0];
                 8'h2B: host_agc_decay          <= usb_cmd_value[3:0];
                 8'h2C: host_agc_holdoff        <= usb_cmd_value[3:0];
+                // PR-G: 2-tier CFAR — soft (candidate) threshold multiplier.
+                // Default RP_DEF_CFAR_ALPHA_SOFT = 0x18 (1.5 in Q4.4, Pfa~10⁻⁵).
+                8'h2D: host_cfar_alpha_soft    <= usb_cmd_value[7:0];
                 // Board bring-up self-test opcodes
                 8'h30: host_self_test_trigger  <= 1'b1;  // Trigger self-test
                 8'h31: host_status_request     <= 1'b1;  // Self-test readback (status alias)

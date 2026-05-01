@@ -8,86 +8,72 @@
  * FT2232H USB 2.0 Hi-Speed FIFO Interface (245 Synchronous FIFO Mode)
  * Channel A only — 8-bit data bus, 60 MHz CLKOUT from FT2232H.
  *
- * BULK PER-FRAME PROTOCOL (replaces legacy per-sample 11-byte packets):
+ * BULK PER-FRAME PROTOCOL V2 (PR-G — single canonical encoding):
  *
- * Frame packet (FPGA→Host): variable length, up to ~35 KB
+ * Frame packet (FPGA→Host): variable length, up to 74,762 bytes
  *   Byte 0:       0xAA (frame start header)
- *   Byte 1:       Format flags {2'b0, sparse_det, mag_only, stream_cfar, stream_doppler, stream_range}
- *   Bytes 2-3:    Frame number (16-bit, MSB first)
- *   Bytes 4-5:    Range bin count (16-bit, MSB first) = 512
- *   Bytes 6-7:    Doppler bin count (16-bit, MSB first) = 32
+ *   Byte 1:       0x02 (PROTOCOL VERSION — host MUST reject any other value)
+ *   Byte 2:       Stream flags {5'b0, stream_cfar, stream_doppler, stream_range}
+ *   Bytes 3-4:    Frame number (uint16, MSB first)
+ *   Bytes 5-6:    Range bin count   (uint16, MSB first) = `RP_NUM_RANGE_BINS`  (512)
+ *   Bytes 7-8:    Doppler bin count (uint16, MSB first) = `RP_NUM_DOPPLER_BINS` (48)
  *
  *   [If stream_range (bit 0):]
- *     Next 1024 bytes: Range profile, 512 × 16-bit magnitude, MSB first
+ *     Next 1024 bytes: range profile, 512 × uint16 Manhattan magnitude, MSB first.
  *
  *   [If stream_doppler (bit 1):]
- *     Next 32768 bytes: Doppler magnitude, 512×32 × 16-bit, row-major, MSB first
+ *     Next 65536 bytes: doppler magnitude, 32768 cells × uint16, row-major
+ *     (range_bin slowest, doppler_bin fastest), MSB first. Cells indexed
+ *     [0..47] are real Doppler bins; cells [48..63] within each range are
+ *     the power-of-2 padding from PR-F (always emitted as 0x0000).
  *
  *   [If stream_cfar (bit 2):]
- *     Next 2048 bytes: Detection flags, 512×32 bits packed into bytes, MSB-first bit order
+ *     Next 8192 bytes: detect_class bitmap, 32768 cells × 2 bits, MSB-first
+ *     packing. Each byte holds 4 cells:
+ *       byte[N]:  bits[7:6]=cell[4*N], bits[5:4]=cell[4*N+1],
+ *                 bits[3:2]=cell[4*N+2], bits[1:0]=cell[4*N+3]
+ *     Cell encoding (per `RP_DETECT_*`):
+ *       2'b00 = NONE      (below soft threshold)
+ *       2'b01 = CANDIDATE (above soft, below confirm — host re-cues)
+ *       2'b10 = CONFIRMED (above confirm threshold — track-eligible)
+ *       2'b11 = RESERVED  (must not be emitted by RTL)
  *
  *   Last byte:    0x55 (frame end footer)
  *
- * INERT FLAGS — mag_only (bit 3) and sparse_det (bit 4) (AUDIT-C9):
- *   The wire format byte 1 reserves these two bits for future encodings:
- *     - mag_only=0 was meant to switch the doppler section to 65536 B
- *       full-I/Q (16-bit I + 16-bit Q per cell, row-major, MSB first).
- *     - sparse_det=1 was meant to switch the CFAR section to a
- *       variable-length list: 2 B count N + N×6 B (range, doppler, mag).
- *   Neither encoding is implemented in the write FSM below — the FSM
- *   always emits 32768 B mag and 2048 B dense bitmap regardless of the
- *   flag bits. To eliminate the foot-gun, `radar_system_top.v` opcode
- *   0x04 force-clamps mag_only=1 and sparse_det=0 in `host_stream_control`
- *   when USB_MODE=1. A SIMULATION-only assertion at the bottom of this
- *   module fires if either bit ever leaves its clamped value, in case a
- *   future patch adds a path that bypasses the host register clamp.
- *
- *   Reasons differ between the two:
- *     - Full-I/Q is constrained by FPGA resources: it needs a new
- *       ~28-BRAM18 I/Q buffer (16384 cells × 32-bit) which may not fit
- *       on the 50T (currently ~78% BRAM18 utilisation after wiring the
- *       Xilinx FFT IP). USB 2.0 bandwidth is also tight: 12.21 MB/s vs
- *       the conservative 8 MB/s sustained budget. Both gating items.
- *     - Sparse-list is feasible — bandwidth-wise it's smaller than the
- *       dense bitmap for any frame with fewer than ~341 detections
- *       (typical scenes produce 10-200), and memory-wise it costs
- *       ~1 BRAM18 with MAX_DETECTIONS=256. The absence is just
- *       unimplemented RTL work (a small detection-list BRAM + a new
- *       WR_DETECT_SPARSE FSM state), not a hardware constraint.
- *   See the open-defects ledger for the follow-up work items.
- *
- * Status packet (FPGA→Host): 26 bytes (unchanged from legacy)
+ * Status packet (FPGA→Host): 30 bytes (PR-G: was 26 in v1, +4 for soft tier)
  *   Byte 0:       0xBB (status header)
- *   Bytes 1-24:   6 × 32-bit status words, MSB first
- *   Byte 25:      0x55 (footer)
+ *   Bytes 1-28:   7 × 32-bit status words, MSB first
+ *                 word[6] = {detect_count_cand[15:0], detect_threshold_soft[15:0]}
+ *   Byte 29:      0x55 (footer)
  *
  * Command (Host→FPGA): 4 bytes received sequentially (unchanged)
- *   Byte 0: opcode[7:0]
+ *   Byte 0: opcode[7:0]    (see RP_OP_* in radar_params.vh)
  *   Byte 1: addr[7:0]
  *   Byte 2: value[15:8]
  *   Byte 3: value[7:0]
  *
  * MEMORY ARCHITECTURE:
- *   - Doppler magnitude BRAM: 512×32 = 16384 entries × 16-bit = 32 KB (~14 BRAM18)
+ *   - Doppler magnitude BRAM: 32768 entries × 16-bit = 64 KB (~28 BRAM18 on 50T)
  *     Written in clk (100 MHz) domain as Doppler cells arrive.
  *     Read in ft_clk (60 MHz) domain during USB bulk transfer.
- *   - Range profile buffer: 512 × 16-bit = 1 KB (~1 BRAM18)
+ *   - Range profile buffer: 512 × 16-bit = 1 KB (1 BRAM18)
  *     Written in clk domain from range_valid events.
- *   - Detection flag buffer: 512×32 = 16384 bits = 2048 bytes (~1 BRAM18)
- *     Written in clk domain from cfar_valid events.
+ *   - Detect-class buffer: 32768 cells × 2 bits = 65536 bits = 8192 bytes (4 BRAM18)
+ *     Written in clk domain from cfar_valid events via 3-cycle RMW pipeline.
  *
- * BANDWIDTH BUDGET (current production: mag_only=1, all streams):
- *   Header: 8 B + Range: 1024 B + Doppler: 32768 B + CFAR: 2048 B + Footer: 1 B
- *   = 35,849 bytes/frame × ~178 fps = 6.38 MB/s
- *   FT2232H 245-Sync-FIFO sustained budget ~8 MB/s conservative (FTDI
- *   AN_232B-04). 80% utilisation; full-I/Q (12.21 MB/s) would not fit at
- *   the conservative budget and is why mag_only is force-clamped to 1.
+ * BANDWIDTH BUDGET (PR-G v2, all streams):
+ *   Header: 9 B + Range: 1024 B + Doppler: 65536 B + Detect: 8192 B + Footer: 1 B
+ *   = 74,762 bytes/frame × ~119 fps (3-subframe rate post-PR-F) ≈ 8.9 MB/s
+ *   FT2232H 245-Sync-FIFO conservative budget ~8 MB/s (FTDI AN_232B-04, 80%
+ *   utilisation); practical sustained throughput is 30–40 MB/s on a tuned
+ *   host. Sufficient headroom even with the conservative budget overshoot.
  *
  * CDC STRATEGY:
- *   - Frame data: Written to dual-port BRAM at 100 MHz, read at 60 MHz (inherently CDC-safe)
- *   - frame_ready flag: Toggle CDC (100 MHz → 60 MHz), same as status_request
- *   - stream_control: 2-stage level sync (changes infrequently)
- *   - Commands: Read FSM in ft_clk domain, output CDC'd by consumer (unchanged)
+ *   - Frame data: Written to dual-port BRAM at 100 MHz, read at 60 MHz (inherently CDC-safe).
+ *   - frame_ready flag: Toggle CDC (100 MHz → 60 MHz), same as status_request.
+ *   - stream_control: 2-stage level sync (changes infrequently).
+ *   - status_*_soft / status_*_cand: 2-stage level sync (slow-changing per-frame values).
+ *   - Commands: Read FSM in ft_clk domain, output CDC'd by consumer (unchanged).
  *
  * Clock domains:
  *   clk       = 100 MHz system clock (radar data domain)
@@ -105,7 +91,8 @@ module usb_data_interface_ft2232h (
     input wire [15:0] doppler_real,
     input wire [15:0] doppler_imag,
     input wire doppler_valid,
-    input wire cfar_detection,
+    // PR-G: 2-bit class replaces single cfar_detection bit.
+    input wire [`RP_DETECT_CLASS_WIDTH-1:0] cfar_detect_class,
     input wire cfar_valid,
 
     // New inputs for bulk frame protocol (clk domain)
@@ -170,7 +157,13 @@ module usb_data_interface_ft2232h (
     // of the gpio_dig7 split. 2-stage level CDC into ft_clk; sticky/slow-
     // changing source so 2-FF sync is sufficient.
     input wire        status_range_decim_watchdog,  // audit F-6.4
-    input wire        status_ddc_cic_fir_overrun    // audit F-1.2
+    input wire        status_ddc_cic_fir_overrun,   // audit F-1.2
+
+    // PR-G: 2-tier CFAR telemetry (clk domain → status_words[6]).
+    // Slow-changing per-frame values; 2-stage level CDC into ft_clk.
+    input wire [7:0]  status_cfar_alpha_soft,       // current host_cfar_alpha_soft (Q4.4)
+    input wire [16:0] status_detect_threshold_soft, // PR-G: candidate-tier threshold (last frame)
+    input wire [15:0] status_detect_count_cand      // PR-G: candidate count (last frame)
 );
 
 // ============================================================================
@@ -191,20 +184,38 @@ localparam DOPPLER_BIN_BITS = `RP_DOPPLER_BIN_WIDTH;// 6 (PR-F)
 localparam FRAME_CELLS     = NUM_RANGE_BINS * (1 << DOPPLER_BIN_BITS);     // 32768 (PR-F)
 // Frame-cell address widths.
 localparam FRAME_ADDR_W      = RANGE_BIN_BITS + DOPPLER_BIN_BITS;          // 15
-localparam DETECT_BYTE_ADDR_W = FRAME_ADDR_W - 3;                          // 12
-localparam DETECT_BYTE_LAST   = (FRAME_CELLS / 8) - 1;                     // 4095
 
-// Frame header: 8 bytes (0xAA + flags + frame_num[2] + range_bins[2] + doppler_bins[2])
-localparam FRAME_HDR_BYTES = 8;
+// PR-G: detect section is 2 bits/cell instead of 1 bit/cell.
+// 32768 cells * 2 bits = 65536 bits = 8192 bytes; needs 13-bit byte address.
+// Cell-to-byte mapping: byte_addr = bit_addr[15:3] = {range_bin[8:0], doppler_bin[5:2]}
+// Sub-byte position (bits within byte) = (3 - doppler_bin[1:0]) * 2, MSB-first.
+localparam DETECT_BITS_PER_CELL = `RP_DETECT_BITS_PER_CELL;                // 2
+localparam DETECT_BYTE_ADDR_W   = FRAME_ADDR_W + 1 - 3;                    // 13
+localparam DETECT_BYTE_LAST     = ((FRAME_CELLS * DETECT_BITS_PER_CELL) / 8) - 1;  // 8191
+localparam DETECT_BIT_ADDR_W    = FRAME_ADDR_W + 1;                        // 16
+
+// Frame header: 9 bytes (0xAA + ver + flags + frame_num[2] + range_bins[2] + doppler_bins[2])
+localparam FRAME_HDR_BYTES = `RP_FRAME_HDR_BYTES;                          // 9 (PR-G)
 // Range profile section: 512 × 2 = 1024 bytes
 localparam RANGE_SECTION_BYTES = NUM_RANGE_BINS * 2;
-// Doppler mag section: 16384 × 2 = 32768 bytes
-localparam DOPPLER_MAG_SECTION_BYTES = FRAME_CELLS * 2;
-// Detection flag section: 16384 bits = 2048 bytes
-localparam DETECT_SECTION_BYTES = FRAME_CELLS / 8;
+// Doppler mag section: 512 range × 48 doppler × 2 = 49152 bytes (PR-G).
+// FSM iterates only valid (range, doppler) cells — the next-pow-2 BRAM
+// padding (doppler 48..63 per range, 8192 dead cells) is skipped on the
+// wire so the body length matches the header's `doppler_bins=48` field.
+localparam DOPPLER_MAG_SECTION_BYTES = NUM_RANGE_BINS * NUM_DOPPLER_BINS * 2;
+// Last valid doppler index — used by WR_DOPPLER_DATA to wrap to next range.
+localparam [DOPPLER_BIN_BITS-1:0] DOP_BIN_LAST = NUM_DOPPLER_BINS[DOPPLER_BIN_BITS-1:0] - 1'b1;
+// Detect class section: emit only valid range × doppler cells.
+// Per range bin: NUM_DOPPLER_BINS × DETECT_BITS_PER_CELL / 8 bytes (rounded
+// up). For 48 doppler × 2 bits = 96 bits = 12 bytes per range. The 4 padded
+// bytes per range (doppler 48..63 indices) are skipped on the wire so the
+// host can compute body length deterministically from the header.
+localparam VALID_DET_BYTES_PER_RANGE = (NUM_DOPPLER_BINS * DETECT_BITS_PER_CELL + 7) / 8;  // 12
+localparam DETECT_SECTION_BYTES      = NUM_RANGE_BINS * VALID_DET_BYTES_PER_RANGE;          // 6144
+localparam [3:0] DET_BYTE_LAST_PER_RANGE = VALID_DET_BYTES_PER_RANGE[3:0] - 4'd1;           // 11
 
-// Status packet: 26 bytes (unchanged)
-localparam STATUS_PKT_LEN = 5'd26;
+// Status packet: 30 bytes (PR-G: 7 × 32-bit words + header + footer)
+localparam STATUS_PKT_LEN = 5'd30;
 
 // ============================================================================
 // WRITE FSM STATES (FPGA → Host, ft_clk domain)
@@ -302,31 +313,24 @@ always @(posedge ft_clk) begin
 end
 
 // ============================================================================
-// DETECTION FLAG BRAM (clk write, ft_clk read)
+// DETECT-CLASS BRAM (clk write, ft_clk read) — PR-G: 2 bits per cell
 // ============================================================================
-// 16384 bits stored as 2048 × 8-bit bytes.
-// Write: individual bit-set on cfar_valid with cfar_detection=1.
-// Clear: bulk clear on frame_complete (start of new frame).
-// Address = {range_bin[8:0], doppler_bin[4:2]} = byte address (11 bits, 2048 entries)
-// Bit position = doppler_bin[1:0] within sub-byte ... actually let's use
-// a simpler scheme: 16384 entries × 1-bit, but that doesn't map well to BRAM.
+// FRAME_CELLS cells × 2 bits = 65536 bits stored as 8192 × 8-bit bytes.
+// Each byte packs 4 consecutive cells (MSB-first):
+//   byte[N] bits[7:6] = cell[4*N + 0]   (doppler_bin[1:0] = 00)
+//   byte[N] bits[5:4] = cell[4*N + 1]   (doppler_bin[1:0] = 01)
+//   byte[N] bits[3:2] = cell[4*N + 2]   (doppler_bin[1:0] = 10)
+//   byte[N] bits[1:0] = cell[4*N + 3]   (doppler_bin[1:0] = 11)
+// Cell encoding per `RP_DETECT_*` (2'b00=NONE / 2'b01=CAND / 2'b10=CONFIRM).
 //
-// Better: Store as 2048 × 8-bit. Each byte holds 8 consecutive detection bits.
-// Bit address = {range_bin, doppler_bin} = 14-bit. Byte addr = bit_addr[13:3].
-// Bit position = bit_addr[2:0].
-// On write: read-modify-write (set bit). On frame clear: bulk zero.
-//
-// For simplicity and BRAM efficiency, we use a separate approach:
-// Store detections in a small register file and pack during transfer.
-// With 512×32=16384 bits, that's 2048 bytes — fits in 1 BRAM18.
-//
-// IMPLEMENTATION: We use the BRAM in byte-write mode. On cfar_valid, we do
-// a 1-cycle read then 1-cycle write-back with the bit set. This works because
-// CFAR outputs arrive one cell per clock cycle (sequential scan).
+// Write path: 3-cycle read-modify-write on cfar_valid (idle → read → write).
+//   Cell index within byte = doppler_bin_in[1:0]
+//   MSB-first shift = (3 - cell_index) * 2  (cell 0 lands in [7:6], cell 3 in [1:0])
+// Clear path: bulk byte-zero on frame_complete (steps 1 byte/cycle).
 
-(* ram_style = "block" *) reg [7:0] detect_bram [0:DETECT_BYTE_LAST];  // PR-F: 3072 entries (was 2048)
+(* ram_style = "block" *) reg [7:0] detect_bram [0:DETECT_BYTE_LAST];  // PR-G: 8192 entries (was 4096)
 
-reg [DETECT_BYTE_ADDR_W-1:0] detect_wr_addr;     // PR-F: 12-bit byte addr (was 11)
+reg [DETECT_BYTE_ADDR_W-1:0] detect_wr_addr;     // PR-G: 13-bit byte addr (was 12)
 reg [7:0]  detect_wr_data;
 reg        detect_wr_en;
 
@@ -335,7 +339,7 @@ always @(posedge clk) begin
         detect_bram[detect_wr_addr] <= detect_wr_data;
 end
 
-reg [DETECT_BYTE_ADDR_W-1:0] detect_rd_addr;     // PR-F: 12-bit byte addr (was 11)
+reg [DETECT_BYTE_ADDR_W-1:0] detect_rd_addr;     // PR-G: 13-bit byte addr (was 12)
 reg [7:0]                     detect_rd_data;
 
 always @(posedge ft_clk) begin
@@ -343,10 +347,9 @@ always @(posedge ft_clk) begin
 end
 
 // Detection BRAM read-modify-write pipeline (clk domain)
-reg [DETECT_BYTE_ADDR_W-1:0] detect_rmw_addr;    // PR-F: 12-bit byte addr (was 11)
-reg [7:0]  detect_rmw_rd;
-reg [2:0]  detect_rmw_bit;
-reg        detect_rmw_value;
+reg [DETECT_BYTE_ADDR_W-1:0] detect_rmw_addr;    // PR-G: 13-bit byte addr (was 12)
+reg [1:0]  detect_rmw_cell_idx;                  // PR-G: 0..3, cell within byte
+reg [`RP_DETECT_CLASS_WIDTH-1:0] detect_rmw_value; // PR-G: 2-bit class (was 1-bit)
 reg [1:0]  detect_rmw_state;  // 0=idle, 1=read, 2=write
 
 // Synchronous read for RMW (clk domain, separate from ft_clk read port)
@@ -389,7 +392,8 @@ wire [15:0] range_mag = range_manhattan[16] ? 16'hFFFF : range_manhattan[15:0];
 reg [15:0] frame_number;        // Incrementing frame counter
 reg        frame_ready_toggle;  // Toggle CDC: frame ready for USB transfer
 reg        frame_filling;       // 1 = currently accumulating frame data
-reg [FRAME_ADDR_W-1:0] detect_clear_addr;   // PR-F: 15-bit bit-counter; FRAME_CELLS = NUM_RANGE_BINS * (1<<DOPPLER_BIN_BITS) = 32768 (full 15-bit space)
+// PR-G: byte-counter (was 15-bit bit-counter in PR-F). 8192 bytes = 13 bits.
+reg [DETECT_BYTE_ADDR_W-1:0] detect_clear_addr;
 reg        detect_clearing;     // 1 = bulk clear in progress
 
 // Range bin counter for range profile writes
@@ -427,11 +431,11 @@ always @(posedge clk or negedge reset_n) begin
         detect_wr_addr     <= {DETECT_BYTE_ADDR_W{1'b0}};
         detect_wr_data     <= 8'd0;
         detect_clearing    <= 1'b0;
-        detect_clear_addr  <= {FRAME_ADDR_W{1'b0}};
+        detect_clear_addr  <= {DETECT_BYTE_ADDR_W{1'b0}};
         detect_rmw_state   <= 2'd0;
         detect_rmw_addr    <= {DETECT_BYTE_ADDR_W{1'b0}};
-        detect_rmw_bit     <= 3'd0;
-        detect_rmw_value   <= 1'b0;
+        detect_rmw_cell_idx <= 2'd0;
+        detect_rmw_value   <= `RP_DETECT_NONE;
         range_write_counter <= {RANGE_BIN_BITS{1'b0}};
     end else begin
         // Default: deassert write enables
@@ -439,22 +443,22 @@ always @(posedge clk or negedge reset_n) begin
         range_wr_en  <= 1'b0;
         detect_wr_en <= 1'b0;
 
-        // === Detection BRAM bulk clear (runs after frame_complete) ===
-        // PR-F: bit-counter is FRAME_ADDR_W (15-bit), byte addr is the upper
-        // (FRAME_ADDR_W-3) bits.
+        // === Detect-class BRAM bulk clear (runs after frame_complete) ===
+        // PR-G: 1 byte/cycle byte-counter (was 8-bits-per-cycle bit-counter).
         if (detect_clearing) begin
             detect_wr_en   <= 1'b1;
-            detect_wr_addr <= detect_clear_addr[FRAME_ADDR_W-1:3];
+            detect_wr_addr <= detect_clear_addr;
             detect_wr_data <= 8'd0;
-            if (detect_clear_addr[FRAME_ADDR_W-1:3] == DETECT_BYTE_LAST[DETECT_BYTE_ADDR_W-1:0]) begin
+            if (detect_clear_addr == DETECT_BYTE_LAST[DETECT_BYTE_ADDR_W-1:0]) begin
                 detect_clearing   <= 1'b0;
-                detect_clear_addr <= {FRAME_ADDR_W{1'b0}};
+                detect_clear_addr <= {DETECT_BYTE_ADDR_W{1'b0}};
             end else begin
-                detect_clear_addr <= detect_clear_addr + 15'd8;  // Step by 8 bits = 1 byte
+                detect_clear_addr <= detect_clear_addr + {{(DETECT_BYTE_ADDR_W-1){1'b0}}, 1'b1};
             end
         end
 
-        // === Detection RMW state machine ===
+        // === Detect-class RMW state machine (PR-G: 2-bit pack) ===
+        // Cell N within byte → MSB-first: shift = (3 - N) * 2 = {!N[1], !N[0], 1'b0}
         case (detect_rmw_state)
             2'd0: begin /* idle */ end
             2'd1: begin
@@ -462,13 +466,13 @@ always @(posedge clk or negedge reset_n) begin
                 detect_rmw_state <= 2'd2;
             end
             2'd2: begin
-                // Write back with bit set/cleared
+                // Write back with the 2-bit class field updated.
                 detect_wr_en   <= 1'b1;
                 detect_wr_addr <= detect_rmw_addr;
-                if (detect_rmw_value)
-                    detect_wr_data <= detect_rmw_rddata | (8'd1 << detect_rmw_bit);
-                else
-                    detect_wr_data <= detect_rmw_rddata & ~(8'd1 << detect_rmw_bit);
+                // Mask out the 2 bits for this cell, OR in the new class.
+                // shift_amt = (3 - cell_idx) * 2 ∈ {6, 4, 2, 0}
+                detect_wr_data <= (detect_rmw_rddata & ~(8'b11000000 >> ({1'b0, detect_rmw_cell_idx} << 1)))
+                                | (({6'b0, detect_rmw_value} << ((3 - {1'b0, detect_rmw_cell_idx}) << 1)));
                 detect_rmw_state <= 2'd0;
             end
             default: detect_rmw_state <= 2'd0;
@@ -489,14 +493,16 @@ always @(posedge clk or negedge reset_n) begin
             range_write_counter <= range_write_counter + {{(RANGE_BIN_BITS-1){1'b0}}, 1'b1};
         end
 
-        // === CFAR detection write (read-modify-write) ===
-        // PR-F: bit_addr = {range_bin_in[8:0], doppler_bin_in[5:0]} = 15-bit.
-        // byte_addr = bit_addr[14:3] (12 bits), bit_pos = bit_addr[2:0].
+        // === CFAR detect-class write (read-modify-write) ===
+        // PR-G: 2 bits per cell. bit_addr = {range_bin[8:0], doppler_bin[5:0]} * 2
+        //        = {range_bin[8:0], doppler_bin[5:0], 1'b0} (16 bits).
+        //   byte_addr = bit_addr[15:3] = {range_bin[8:0], doppler_bin[5:2]} (13 bits)
+        //   cell_idx within byte = doppler_bin[1:0] (0..3, MSB-first ordering)
         if (cfar_valid && frame_filling && detect_rmw_state == 2'd0 && !detect_clearing) begin
-            detect_rmw_addr  <= {range_bin_in, doppler_bin_in[DOPPLER_BIN_BITS-1:3]};
-            detect_rmw_bit   <= doppler_bin_in[2:0];
-            detect_rmw_value <= cfar_detection;
-            detect_rmw_state <= 2'd1;
+            detect_rmw_addr     <= {range_bin_in, doppler_bin_in[DOPPLER_BIN_BITS-1:2]};
+            detect_rmw_cell_idx <= doppler_bin_in[1:0];
+            detect_rmw_value    <= cfar_detect_class;
+            detect_rmw_state    <= 2'd1;
         end
 
         // === Frame complete: latch frame, signal ft_clk domain ===
@@ -603,9 +609,19 @@ reg status_toggle_prev;
 wire frame_ready_ft = frame_ready_sync[2] ^ frame_ready_prev;
 wire status_req_ft  = status_toggle_sync[2] ^ status_toggle_prev;
 
-// --- Stream control CDC (6-bit, 2-stage level sync) ---
+// --- Stream control CDC (6-bit wire, but only [2:0] used in PR-G v2; [5:3] reserved=0).
+//     2-stage level sync (changes infrequently). ---
 (* ASYNC_REG = "TRUE" *) reg [5:0] stream_ctrl_sync_0;
 (* ASYNC_REG = "TRUE" *) reg [5:0] stream_ctrl_sync_1;
+
+// --- PR-G: 2-tier CFAR telemetry CDC (clk → ft_clk, 2-stage level sync).
+//     Slow-changing per-frame values; sufficient for status readback. ---
+(* ASYNC_REG = "TRUE" *) reg [7:0]  alpha_soft_sync_0;
+reg [7:0]                           alpha_soft_sync_1;
+(* ASYNC_REG = "TRUE" *) reg [16:0] det_thr_soft_sync_0;
+reg [16:0]                          det_thr_soft_sync_1;
+(* ASYNC_REG = "TRUE" *) reg [15:0] det_count_cand_sync_0;
+reg [15:0]                          det_count_cand_sync_1;
 
 // --- AUDIT-C12: frame_drop_count CDC (slow-changing 7-bit value, 2-stage sync) ---
 (* ASYNC_REG = "TRUE" *) reg [6:0] frame_drop_sync_0;
@@ -621,39 +637,42 @@ reg                          ddc_cic_fir_overrun_sync_1;
 wire stream_range_en   = stream_ctrl_sync_1[0];
 wire stream_doppler_en = stream_ctrl_sync_1[1];
 wire stream_cfar_en    = stream_ctrl_sync_1[2];
-wire stream_mag_only   = stream_ctrl_sync_1[3];
-wire stream_sparse_det = stream_ctrl_sync_1[4];
-// Bit 5 reserved
-// NOTE: Phase 1 write FSM always sends magnitude-only range/Doppler and
-// dense detection bitmap. The mag_only and sparse_det bits are included in
-// the frame header for the Python parser but are not yet honored by the
-// write FSM. Phase 2 will add I/Q and sparse detection paths.
+// Bits [5:3] reserved=0 in PR-G v2. The legacy mag_only/sparse_det/frame_decimate
+// flags were retired with v1 — there is one canonical encoding now (Manhattan-mag
+// doppler + 2-bit dense detect).
 
 // --- Frame metadata snapshot (latched in clk domain, stable for ft_clk read) ---
 reg [15:0] frame_number_snapshot;
-reg [5:0]  stream_flags_snapshot;
+reg [2:0]  stream_flags_snapshot;  // PR-G: 3 bits used (range/doppler/cfar)
 
 always @(posedge clk or negedge reset_n) begin
     if (!reset_n) begin
         frame_number_snapshot <= 16'd0;
-        stream_flags_snapshot <= `RP_STREAM_CTRL_DEFAULT;
+        stream_flags_snapshot <= 3'b111;  // PR-G: all 3 streams on (range|doppler|cfar)
     end else if (frame_complete) begin
         frame_number_snapshot <= frame_number;
-        stream_flags_snapshot <= stream_control;
+        stream_flags_snapshot <= stream_control[2:0];  // PR-G: ignore reserved [5:3]
     end
 end
 
-// --- Status snapshot (ft_clk domain) ---
-reg [31:0] status_words [0:5];
+// --- Status snapshot (ft_clk domain) — PR-G: 7 words (was 6) ---
+reg [31:0] status_words [0:6];
 
 // Byte counter for write FSM (needs to be wide enough for largest section)
 reg [15:0] wr_byte_idx;
 
 // BRAM read address for frame transfer
-reg [FRAME_ADDR_W-1:0] bram_rd_cell;     // PR-F: 15-bit cell index 0..24575
-reg [RANGE_BIN_BITS-1:0] range_rd_idx;   // Range bin index 0..511
-reg        wr_byte_phase;                // 0=MSB, 1=LSB for 16-bit values
-reg [DETECT_BYTE_ADDR_W-1:0] detect_rd_idx; // PR-F: 12-bit byte index 0..3071
+reg [RANGE_BIN_BITS-1:0]    range_rd_idx;     // Range section: 0..511
+// PR-G: nested counters for doppler section so we emit only valid cells
+// (range 0..511, doppler 0..47) and skip the BRAM padding at doppler 48..63.
+reg [RANGE_BIN_BITS-1:0]    dop_range_idx;    // Doppler section outer: 0..511
+reg [DOPPLER_BIN_BITS-1:0]  dop_doppler_idx;  // Doppler section inner: 0..47
+reg                         wr_byte_phase;    // 0=MSB, 1=LSB for 16-bit values
+// PR-G: nested counters for detect section so we emit only valid bytes
+// (12 per range, doppler indices 0..47) and skip the 4 padded bytes from
+// doppler 48..63. detect_rd_addr is composed from these.
+reg [RANGE_BIN_BITS-1:0]    det_range_idx;        // 0..511
+reg [3:0]                   det_doppler_byte_idx; // 0..11 (= NUM_DOPPLER_BINS*2/8 - 1)
 
 // ============================================================================
 // CLOCK-ACTIVITY WATCHDOG (clk domain)
@@ -737,17 +756,26 @@ always @(posedge ft_clk or negedge ft_effective_reset_n) begin
         range_decim_watchdog_sync_1 <= 1'b0;
         ddc_cic_fir_overrun_sync_0  <= 1'b0;
         ddc_cic_fir_overrun_sync_1  <= 1'b0;
-        for (si = 0; si < 6; si = si + 1)
+        // PR-G: 2-tier CFAR telemetry CDC reset
+        alpha_soft_sync_0     <= 8'd0;
+        alpha_soft_sync_1     <= 8'd0;
+        det_thr_soft_sync_0   <= 17'd0;
+        det_thr_soft_sync_1   <= 17'd0;
+        det_count_cand_sync_0 <= 16'd0;
+        det_count_cand_sync_1 <= 16'd0;
+        for (si = 0; si < 7; si = si + 1)
             status_words[si] <= 32'd0;
-        wr_state       <= WR_IDLE;
-        wr_byte_idx    <= 16'd0;
-        wr_byte_phase  <= 1'b0;
-        bram_rd_cell   <= {FRAME_ADDR_W{1'b0}};
-        range_rd_idx   <= {RANGE_BIN_BITS{1'b0}};
-        range_rd_addr  <= {RANGE_BIN_BITS{1'b0}};
-        detect_rd_idx  <= {DETECT_BYTE_ADDR_W{1'b0}};
-        detect_rd_addr <= {DETECT_BYTE_ADDR_W{1'b0}};
-        mag_rd_addr    <= {FRAME_ADDR_W{1'b0}};
+        wr_state              <= WR_IDLE;
+        wr_byte_idx           <= 16'd0;
+        wr_byte_phase         <= 1'b0;
+        dop_range_idx         <= {RANGE_BIN_BITS{1'b0}};
+        dop_doppler_idx       <= {DOPPLER_BIN_BITS{1'b0}};
+        range_rd_idx          <= {RANGE_BIN_BITS{1'b0}};
+        range_rd_addr         <= {RANGE_BIN_BITS{1'b0}};
+        det_range_idx         <= {RANGE_BIN_BITS{1'b0}};
+        det_doppler_byte_idx  <= 4'd0;
+        detect_rd_addr        <= {DETECT_BYTE_ADDR_W{1'b0}};
+        mag_rd_addr           <= {FRAME_ADDR_W{1'b0}};
         rd_state        <= RD_IDLE;
         rd_byte_cnt     <= 2'd0;
         rd_cmd_complete <= 1'b0;
@@ -787,6 +815,14 @@ always @(posedge ft_clk or negedge ft_effective_reset_n) begin
         ddc_cic_fir_overrun_sync_0  <= status_ddc_cic_fir_overrun;
         ddc_cic_fir_overrun_sync_1  <= ddc_cic_fir_overrun_sync_0;
 
+        // PR-G: 2-tier CFAR telemetry CDC (clk → ft_clk for status read)
+        alpha_soft_sync_0     <= status_cfar_alpha_soft;
+        alpha_soft_sync_1     <= alpha_soft_sync_0;
+        det_thr_soft_sync_0   <= status_detect_threshold_soft;
+        det_thr_soft_sync_1   <= det_thr_soft_sync_0;
+        det_count_cand_sync_0 <= status_detect_count_cand;
+        det_count_cand_sync_1 <= det_count_cand_sync_0;
+
         // Status snapshot on request
         if (status_req_ft) begin
             // Word 0: {0xFF, mode[1:0], stream[5:0], threshold[15:0]}
@@ -801,7 +837,7 @@ always @(posedge ft_clk or negedge ft_effective_reset_n) begin
                                 status_agc_saturation_count,    // [19:12]
                                 status_agc_enable,              // [11]
                                 status_chirps_mismatch,         // [10] TX-G mismatch flag
-                                8'd0,                           // [9:2] reserved
+                                alpha_soft_sync_1,              // [9:2] PR-G: host_cfar_alpha_soft echo (Q4.4)
                                 status_range_mode};             // [1:0]
             // Word 5: {frame_drop_count[31:25], self_test_busy[24],
             //          reserved[23:16], self_test_detail[15:8], reserved[7],
@@ -816,6 +852,15 @@ always @(posedge ft_clk or negedge ft_effective_reset_n) begin
                                 ddc_cic_fir_overrun_sync_1,    // [6] audit F-1.2
                                 range_decim_watchdog_sync_1,   // [5] audit F-6.4
                                 status_self_test_flags};       // [4:0]
+            // PR-G word 6: {detect_count_cand[15:0], detect_threshold_soft[15:0]}.
+            // detect_threshold_soft is 17-bit; saturate to 16 bits for status (top
+            // bit set → emit 0xFFFF). alpha_soft (8-bit) does not need to be in
+            // the status packet — host wrote it via opcode 0x2D and tracks it
+            // locally; it's CDC'd here for any future readback need but is not
+            // emitted by the FSM today. (Pack into reserved bits if needed in v3.)
+            status_words[6] <= {det_count_cand_sync_1,
+                                (det_thr_soft_sync_1[16] ? 16'hFFFF
+                                                         : det_thr_soft_sync_1[15:0])};
         end
 
         // ================================================================
@@ -899,15 +944,17 @@ always @(posedge ft_clk or negedge ft_effective_reset_n) begin
                     end
                     // New frame ready for transfer
                     else if (frame_ready_ft && ft_rxf_n) begin
-                        wr_state      <= WR_FRAME_HDR;
-                        wr_byte_idx   <= 16'd0;
-                        bram_rd_cell  <= {FRAME_ADDR_W{1'b0}};
-                        range_rd_idx  <= {RANGE_BIN_BITS{1'b0}};
-                        range_rd_addr <= {RANGE_BIN_BITS{1'b0}};  // Pre-load first read addr
-                        detect_rd_idx <= {DETECT_BYTE_ADDR_W{1'b0}};
-                        detect_rd_addr <= {DETECT_BYTE_ADDR_W{1'b0}};
-                        mag_rd_addr   <= {FRAME_ADDR_W{1'b0}};
-                        wr_byte_phase <= 1'b0;
+                        wr_state             <= WR_FRAME_HDR;
+                        wr_byte_idx          <= 16'd0;
+                        dop_range_idx        <= {RANGE_BIN_BITS{1'b0}};
+                        dop_doppler_idx      <= {DOPPLER_BIN_BITS{1'b0}};
+                        range_rd_idx         <= {RANGE_BIN_BITS{1'b0}};
+                        range_rd_addr        <= {RANGE_BIN_BITS{1'b0}};   // Pre-load first read addr
+                        det_range_idx        <= {RANGE_BIN_BITS{1'b0}};
+                        det_doppler_byte_idx <= 4'd0;
+                        detect_rd_addr       <= {DETECT_BYTE_ADDR_W{1'b0}};
+                        mag_rd_addr          <= {FRAME_ADDR_W{1'b0}};     // {range=0, doppler=0}
+                        wr_byte_phase        <= 1'b0;
                     end
                 end
 
@@ -917,18 +964,21 @@ always @(posedge ft_clk or negedge ft_effective_reset_n) begin
                         ft_data_oe <= 1'b1;
                         ft_wr_n    <= 1'b0;
 
-                        case (wr_byte_idx[2:0])
-                            3'd0: ft_data_out <= HEADER;
-                            3'd1: ft_data_out <= {2'b00, stream_flags_snapshot};
-                            3'd2: ft_data_out <= frame_number_snapshot[15:8];
-                            3'd3: ft_data_out <= frame_number_snapshot[7:0];
-                            3'd4: ft_data_out <= NUM_RANGE_BINS[15:8];    // 512 >> 8 = 2
-                            3'd5: ft_data_out <= NUM_RANGE_BINS[7:0];     // 512 & 0xFF = 0
-                            3'd6: ft_data_out <= NUM_DOPPLER_BINS[15:8];  // 32 >> 8 = 0
-                            3'd7: ft_data_out <= NUM_DOPPLER_BINS[7:0];   // 32 & 0xFF = 32
+                        // PR-G: 9-byte header (was 8). Byte 1 = protocol version.
+                        case (wr_byte_idx[3:0])
+                            4'd0: ft_data_out <= HEADER;
+                            4'd1: ft_data_out <= `RP_USB_PROTOCOL_VERSION;       // 0x02
+                            4'd2: ft_data_out <= {5'b00000, stream_flags_snapshot};
+                            4'd3: ft_data_out <= frame_number_snapshot[15:8];
+                            4'd4: ft_data_out <= frame_number_snapshot[7:0];
+                            4'd5: ft_data_out <= NUM_RANGE_BINS[15:8];    // 512 >> 8 = 2
+                            4'd6: ft_data_out <= NUM_RANGE_BINS[7:0];     // 512 & 0xFF = 0
+                            4'd7: ft_data_out <= NUM_DOPPLER_BINS[15:8];  // 48 >> 8 = 0
+                            4'd8: ft_data_out <= NUM_DOPPLER_BINS[7:0];   // 48 & 0xFF = 48
+                            default: ft_data_out <= 8'h00;
                         endcase
 
-                        if (wr_byte_idx[2:0] == 3'd7) begin
+                        if (wr_byte_idx[3:0] == 4'd8) begin
                             wr_byte_idx   <= 16'd0;
                             wr_byte_phase <= 1'b0;
                             // Decide next section based on stream flags
@@ -968,10 +1018,11 @@ always @(posedge ft_clk or negedge ft_effective_reset_n) begin
                         wr_byte_idx <= wr_byte_idx + 16'd1;
 
                         if (wr_byte_idx == RANGE_SECTION_BYTES[15:0] - 16'd1) begin
-                            wr_byte_idx   <= 16'd0;
-                            wr_byte_phase <= 1'b0;
-                            bram_rd_cell  <= {FRAME_ADDR_W{1'b0}};
-                            mag_rd_addr   <= {FRAME_ADDR_W{1'b0}};
+                            wr_byte_idx     <= 16'd0;
+                            wr_byte_phase   <= 1'b0;
+                            dop_range_idx   <= {RANGE_BIN_BITS{1'b0}};
+                            dop_doppler_idx <= {DOPPLER_BIN_BITS{1'b0}};
+                            mag_rd_addr     <= {FRAME_ADDR_W{1'b0}};  // {range=0, doppler=0}
                             if (stream_flags_snapshot[1])
                                 wr_state <= WR_DOPPLER_DATA;
                             else if (stream_flags_snapshot[2])
@@ -982,8 +1033,11 @@ always @(posedge ft_clk or negedge ft_effective_reset_n) begin
                     end
                 end
 
-                // ---- Doppler magnitude: 16384 × 2 = 32768 bytes (mag_only mode) ----
-                // Row-major: range_bin varies slowest, doppler_bin varies fastest.
+                // ---- Doppler magnitude: 512 × 48 × 2 = 49152 bytes ----
+                // PR-G: row-major iteration over valid (range, doppler) cells
+                // only. Skips BRAM padding at doppler 48..63 by jumping to next
+                // range when doppler hits DOP_BIN_LAST. Header field
+                // doppler_bins=48 matches body length exactly.
                 WR_DOPPLER_DATA: begin
                     if (!ft_txe_n) begin
                         ft_data_oe <= 1'b1;
@@ -995,17 +1049,28 @@ always @(posedge ft_clk or negedge ft_effective_reset_n) begin
                         end else begin
                             ft_data_out   <= mag_rd_data[7:0];
                             wr_byte_phase <= 1'b0;
-                            bram_rd_cell  <= bram_rd_cell + {{(FRAME_ADDR_W-1){1'b0}}, 1'b1};
-                            mag_rd_addr   <= bram_rd_cell + {{(FRAME_ADDR_W-1){1'b0}}, 1'b1};
+                            // Pre-load mag_rd_addr 1 cell ahead (BRAM 1-cycle
+                            // read latency). Address layout: {range[8:0], doppler[5:0]}.
+                            if (dop_doppler_idx == DOP_BIN_LAST) begin
+                                dop_doppler_idx <= {DOPPLER_BIN_BITS{1'b0}};
+                                dop_range_idx   <= dop_range_idx + {{(RANGE_BIN_BITS-1){1'b0}}, 1'b1};
+                                mag_rd_addr     <= {dop_range_idx + {{(RANGE_BIN_BITS-1){1'b0}}, 1'b1},
+                                                    {DOPPLER_BIN_BITS{1'b0}}};
+                            end else begin
+                                dop_doppler_idx <= dop_doppler_idx + {{(DOPPLER_BIN_BITS-1){1'b0}}, 1'b1};
+                                mag_rd_addr     <= {dop_range_idx,
+                                                    dop_doppler_idx + {{(DOPPLER_BIN_BITS-1){1'b0}}, 1'b1}};
+                            end
                         end
 
                         wr_byte_idx <= wr_byte_idx + 16'd1;
 
                         if (wr_byte_idx == DOPPLER_MAG_SECTION_BYTES[15:0] - 16'd1) begin
-                            wr_byte_idx    <= 16'd0;
-                            wr_byte_phase  <= 1'b0;
-                            detect_rd_idx  <= {DETECT_BYTE_ADDR_W{1'b0}};
-                            detect_rd_addr <= {DETECT_BYTE_ADDR_W{1'b0}};
+                            wr_byte_idx          <= 16'd0;
+                            wr_byte_phase        <= 1'b0;
+                            det_range_idx        <= {RANGE_BIN_BITS{1'b0}};
+                            det_doppler_byte_idx <= 4'd0;
+                            detect_rd_addr       <= {DETECT_BYTE_ADDR_W{1'b0}};
                             if (stream_flags_snapshot[2])
                                 wr_state <= WR_DETECT_DATA;
                             else
@@ -1014,16 +1079,28 @@ always @(posedge ft_clk or negedge ft_effective_reset_n) begin
                     end
                 end
 
-                // ---- Detection flags: 2048 bytes (dense mode) ----
+                // ---- Detection flags: 512 × 12 = 6144 bytes (PR-G, 2-bit dense) ----
+                // PR-G: nested advance through (range 0..511, doppler_byte 0..11).
+                // Skips 4 padded detect bytes per range (doppler 48..63 indices)
+                // so the wire body matches host's expected size of
+                // range_bins × doppler_bins × 2 / 8 = 6144 bytes.
                 WR_DETECT_DATA: begin
                     if (!ft_txe_n) begin
                         ft_data_oe <= 1'b1;
                         ft_wr_n    <= 1'b0;
 
                         // 1-byte per cycle (BRAM read latency handled by pre-loading addr)
-                        ft_data_out    <= detect_rd_data;
-                        detect_rd_idx  <= detect_rd_idx + {{(DETECT_BYTE_ADDR_W-1){1'b0}}, 1'b1};
-                        detect_rd_addr <= detect_rd_idx + {{(DETECT_BYTE_ADDR_W-1){1'b0}}, 1'b1};
+                        ft_data_out <= detect_rd_data;
+                        if (det_doppler_byte_idx == DET_BYTE_LAST_PER_RANGE) begin
+                            det_doppler_byte_idx <= 4'd0;
+                            det_range_idx        <= det_range_idx + {{(RANGE_BIN_BITS-1){1'b0}}, 1'b1};
+                            detect_rd_addr       <= {det_range_idx + {{(RANGE_BIN_BITS-1){1'b0}}, 1'b1},
+                                                     4'd0};
+                        end else begin
+                            det_doppler_byte_idx <= det_doppler_byte_idx + 4'd1;
+                            detect_rd_addr       <= {det_range_idx,
+                                                     det_doppler_byte_idx + 4'd1};
+                        end
 
                         wr_byte_idx <= wr_byte_idx + 16'd1;
 
@@ -1044,7 +1121,7 @@ always @(posedge ft_clk or negedge ft_effective_reset_n) begin
                     end
                 end
 
-                // ---- Status packet: 26 bytes (unchanged from legacy) ----
+                // ---- Status packet: 30 bytes (PR-G v2: 7 × 32-bit words) ----
                 WR_STATUS_SEND: begin
                     if (!ft_txe_n) begin
                         ft_data_oe <= 1'b1;
@@ -1076,7 +1153,11 @@ always @(posedge ft_clk or negedge ft_effective_reset_n) begin
                             5'd22: ft_data_out <= status_words[5][23:16];
                             5'd23: ft_data_out <= status_words[5][15:8];
                             5'd24: ft_data_out <= status_words[5][7:0];
-                            5'd25: ft_data_out <= FOOTER;
+                            5'd25: ft_data_out <= status_words[6][31:24];   // PR-G
+                            5'd26: ft_data_out <= status_words[6][23:16];   // PR-G
+                            5'd27: ft_data_out <= status_words[6][15:8];    // PR-G
+                            5'd28: ft_data_out <= status_words[6][7:0];     // PR-G
+                            5'd29: ft_data_out <= FOOTER;
                             default: ft_data_out <= 8'h00;
                         endcase
 
@@ -1156,30 +1237,6 @@ always @(posedge ft_clk or negedge ft_reset_n) begin
         cmd_addr_prev   <= cmd_addr;
         cmd_value_prev  <= cmd_value;
         cmd_valid_prev  <= cmd_valid;
-    end
-end
-`endif
-
-// ============================================================================
-// AUDIT-C9: inert-flag checker (simulation only)
-//
-// stream_mag_only and stream_sparse_det are documented in the wire format
-// but the write FSM does not act on them — see the "INERT FLAGS" note in
-// the module header. radar_system_top.v opcode 0x04 force-clamps these
-// bits when USB_MODE=1 so production firmware cannot reach an unsupported
-// state. This checker is the backstop: it fires `[ASSERT FAIL]` if either
-// bit ever escapes its clamped value, catching any future patch that
-// bypasses the host register clamp (e.g. a different opcode that writes
-// stream_control directly, or a stream_control source other than the
-// host). Synthesis-inert.
-// ============================================================================
-`ifdef SIMULATION
-always @(posedge clk) begin
-    if (reset_n) begin
-        if (stream_mag_only !== 1'b1)
-            $display("[ASSERT FAIL] AUDIT-C9: stream_mag_only=0; full-I/Q write FSM not implemented");
-        if (stream_sparse_det !== 1'b0)
-            $display("[ASSERT FAIL] AUDIT-C9: stream_sparse_det=1; sparse-list write FSM not implemented");
     end
 end
 `endif

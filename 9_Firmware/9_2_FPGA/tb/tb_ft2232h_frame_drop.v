@@ -16,10 +16,9 @@
 //   3. Multiple drops while stalled → drop count saturates at 127
 //   4. Stalled + recovery → drop count stable, frame_pending clears post-drain
 //
-// Stimulus uses `stream_control = 6'b001_000` (mag_only=1, no sections enabled)
-// so the WR FSM goes HDR (8B) → FOOTER (1B) → DONE in 9 ft_clk cycles. This
-// gives a fast, deterministic per-frame transfer time. AUDIT-C9 sim assertion
-// is satisfied (mag_only=1, sparse_det=0).
+// Stimulus uses `stream_control = 6'b000_000` (PR-G v2: no inert flags, no
+// sections enabled) so the WR FSM goes HDR (9B) → FOOTER (1B) → DONE in 10
+// ft_clk cycles. This gives a fast, deterministic per-frame transfer time.
 //
 // PASS criteria:
 //   - frame_drop_count matches expected value after each scenario
@@ -42,11 +41,13 @@ module tb_ft2232h_frame_drop;
     reg [15:0] doppler_real  = 16'd0;
     reg [15:0] doppler_imag  = 16'd0;
     reg        doppler_valid = 1'b0;
-    reg        cfar_detection = 1'b0;
+    // PR-G: 2-bit class (was 1-bit cfar_detection)
+    reg [`RP_DETECT_CLASS_WIDTH-1:0] cfar_detect_class = `RP_DETECT_NONE;
     reg        cfar_valid    = 1'b0;
 
     reg [`RP_RANGE_BIN_WIDTH_MAX-1:0] range_bin_in   = 0;
-    reg [4:0]                         doppler_bin_in = 5'd0;
+    // PR-F: doppler_bin widened to RP_DOPPLER_BIN_WIDTH (6 bits)
+    reg [`RP_DOPPLER_BIN_WIDTH-1:0]   doppler_bin_in = {`RP_DOPPLER_BIN_WIDTH{1'b0}};
     reg                               frame_complete = 1'b0;
 
     // FT2232H interface (ft_clk domain)
@@ -64,14 +65,14 @@ module tb_ft2232h_frame_drop;
     wire [7:0]  cmd_addr;
     wire [15:0] cmd_value;
 
-    // mag_only=1, sparse_det=0, all sections disabled (skip range/doppler/cfar)
-    // → WR FSM: HDR → FOOTER → DONE = fast deterministic drain
-    reg [5:0] stream_control = 6'b001_000;
+    // PR-G: stream bits [2:0] all off → WR FSM: HDR → FOOTER → DONE
+    // = fast deterministic drain. Bits [5:3] are reserved=0 in v2.
+    reg [5:0] stream_control = 6'b000_000;
 
     // Status inputs (irrelevant for this test)
     reg        status_request = 1'b0;
     reg [15:0] status_cfar_threshold = 16'd0;
-    reg [5:0]  status_stream_ctrl = 6'b001_000;
+    reg [5:0]  status_stream_ctrl = 6'b000_000;
     reg [1:0]  status_radar_mode = 2'd0;
     reg [15:0] status_long_chirp = 16'd0;
     reg [15:0] status_long_listen = 16'd0;
@@ -104,7 +105,7 @@ module tb_ft2232h_frame_drop;
         .doppler_real(doppler_real),
         .doppler_imag(doppler_imag),
         .doppler_valid(doppler_valid),
-        .cfar_detection(cfar_detection),
+        .cfar_detect_class(cfar_detect_class),  // PR-G: 2-bit class
         .cfar_valid(cfar_valid),
         .range_bin_in(range_bin_in),
         .doppler_bin_in(doppler_bin_in),
@@ -144,7 +145,11 @@ module tb_ft2232h_frame_drop;
         .status_agc_enable(status_agc_enable),
         // AUDIT-S10: control-fault flags tied off (frame-drop TB scope)
         .status_range_decim_watchdog(1'b0),
-        .status_ddc_cic_fir_overrun(1'b0)
+        .status_ddc_cic_fir_overrun(1'b0),
+        // PR-G: 2-tier CFAR telemetry tied off
+        .status_cfar_alpha_soft(8'h18),       // RP_DEF_CFAR_ALPHA_SOFT
+        .status_detect_threshold_soft(17'd0),
+        .status_detect_count_cand(16'd0)
     );
 
     task pulse_frame_complete;
@@ -200,10 +205,10 @@ module tb_ft2232h_frame_drop;
         $display("\n[TEST 1] Single frame, USB ready -> no drops");
         ft_txe_n = 1'b0;
         pulse_frame_complete();
-        // Wait for frame to drain through WR_FSM. With mag_only mode and
-        // stream_control[2:0]=000, FSM goes HDR (8B) -> FOOTER (1B) -> DONE.
-        // Each byte = 1 ft_clk cycle. Plus CDC latency. Allow ~50 ft_clk
-        // = ~833 ns = ~83 clk cycles. Be generous: wait 200 clk cycles.
+        // Wait for frame to drain through WR_FSM. PR-G v2: stream_control[2:0]=000,
+        // FSM goes HDR (9B) -> FOOTER (1B) -> DONE = 10 ft_clk cycles. Plus CDC
+        // latency. Allow ~50 ft_clk = ~833 ns = ~83 clk cycles. Be generous:
+        // wait 200 clk cycles.
         wait_cycles(200);
         check(1, "drop_count", 0, u_dut.frame_drop_count);
         check(1, "frame_pending_cleared", 0, u_dut.frame_pending);

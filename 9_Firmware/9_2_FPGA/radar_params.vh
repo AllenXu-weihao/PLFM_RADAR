@@ -270,10 +270,71 @@
 //   Bit 0 = range profile stream
 //   Bit 1 = doppler map stream
 //   Bit 2 = cfar/detection stream
-// Bits [5:3]: Stream format control
-//   Bit 3 = mag_only    (0=I/Q pairs, 1=Manhattan magnitude only)
-//   Bit 4 = sparse_det  (0=dense detection flags, 1=sparse detection list)
-//   Bit 5 = reserved (was frame_decimate, not needed with mag-only fitting)
-`define RP_STREAM_CTRL_DEFAULT      6'b001_111  // all streams, mag-only mode
+// Bits [5:3]: RESERVED (must be 0). PR-G dropped the legacy inert
+//   mag_only/sparse_det/frame_decimate flags — protocol v2 ships a single
+//   canonical encoding (Manhattan-mag doppler + 2-bit dense detect).
+`define RP_STREAM_CTRL_DEFAULT      6'b000_111  // all 3 streams on, no flags
+
+// ============================================================================
+// USB PROTOCOL V2 (PR-G — clean cutover from v1)
+// ============================================================================
+// Wire format (FPGA → Host bulk frame):
+//   Byte 0:       0xAA (frame start)
+//   Byte 1:       0x02 (PROTOCOL VERSION — pinned, host MUST reject != 0x02)
+//   Byte 2:       Stream flags {5'd0, stream_cfar, stream_doppler, stream_range}
+//   Bytes 3–4:    Frame number (uint16, MSB first)
+//   Bytes 5–6:    Range bin count (uint16, MSB first) = `RP_NUM_RANGE_BINS`
+//   Bytes 7–8:    Doppler bin count (uint16, MSB first) = `RP_NUM_DOPPLER_BINS`
+//   [stream_range:]   1024 B range profile (512 × uint16, MSB first)
+//   [stream_doppler:] 65536 B doppler magnitude (32768 cells × uint16, row-major)
+//   [stream_cfar:]    8192 B detect bitmap (32768 cells × 2 bits, MSB-first
+//                     packing: cell[N] in byte[N/4] bits [7-(N%4)*2 -: 2])
+//   Last byte:    0x55 (footer)
+//
+// Total frame (all streams on): 9 + 1024 + 65536 + 8192 + 1 = 74762 B
+// At ~119 fps (PR-F 3-subframe rate) ≈ 8.9 MB/s — within FT2232H bulk budget.
+`define RP_USB_PROTOCOL_VERSION     8'h02    // pinned; host rejects mismatch
+`define RP_FRAME_HDR_BYTES          9        // 0xAA + ver + flags + 2*fn + 2*rb + 2*db
+`define RP_DETECT_BITS_PER_CELL     2        // PR-G: 2-bit dense (NONE/CAND/CONFIRM/RSVD)
+`define RP_DETECT_CELLS_PER_BYTE    4        // 8 / RP_DETECT_BITS_PER_CELL
+
+// ============================================================================
+// USB OPCODE MAP (PR-G v2 — single source of truth for RTL & GUI parity)
+// ============================================================================
+`define RP_OP_RADAR_MODE            8'h01
+`define RP_OP_TRIGGER_PULSE         8'h02
+`define RP_OP_DETECT_THRESHOLD      8'h03
+`define RP_OP_STREAM_CONTROL        8'h04
+`define RP_OP_LONG_CHIRP_CYCLES     8'h10
+`define RP_OP_LONG_LISTEN_CYCLES    8'h11
+`define RP_OP_GUARD_CYCLES          8'h12
+`define RP_OP_SHORT_CHIRP_CYCLES    8'h13
+`define RP_OP_SHORT_LISTEN_CYCLES   8'h14
+`define RP_OP_CHIRPS_PER_ELEV       8'h15
+`define RP_OP_GAIN_SHIFT            8'h16
+// PR-G G2: MEDIUM ladder timings (SHORT/LONG already at 0x10-0x14, GUARD at 0x12).
+`define RP_OP_MEDIUM_CHIRP_CYCLES   8'h17
+`define RP_OP_MEDIUM_LISTEN_CYCLES  8'h18
+// 0x19–0x1F reserved (per-waveform guard if needed in future)
+`define RP_OP_RANGE_MODE            8'h20
+`define RP_OP_CFAR_GUARD            8'h21
+`define RP_OP_CFAR_TRAIN            8'h22
+`define RP_OP_CFAR_ALPHA            8'h23   // confirm-tier (Q4.4)
+`define RP_OP_CFAR_MODE             8'h24
+`define RP_OP_CFAR_ENABLE           8'h25
+`define RP_OP_MTI_ENABLE            8'h26
+`define RP_OP_DC_NOTCH_WIDTH        8'h27
+`define RP_OP_AGC_ENABLE            8'h28
+`define RP_OP_AGC_TARGET            8'h29
+`define RP_OP_AGC_ATTACK            8'h2A
+`define RP_OP_AGC_DECAY             8'h2B
+`define RP_OP_AGC_HOLDOFF           8'h2C
+`define RP_OP_CFAR_ALPHA_SOFT       8'h2D   // PR-G: candidate-tier (Q4.4)
+// 0x2E–0x2F reserved
+`define RP_OP_SELF_TEST_TRIGGER     8'h30
+`define RP_OP_SELF_TEST_STATUS      8'h31
+`define RP_OP_ADC_PWDN              8'h32
+`define RP_OP_ADC_FORMAT            8'h33
+`define RP_OP_STATUS_REQUEST        8'hFF
 
 `endif // RADAR_PARAMS_VH

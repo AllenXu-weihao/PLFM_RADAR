@@ -47,6 +47,9 @@ module radar_receiver_final (
     input wire [15:0] host_guard_cycles,
     input wire [15:0] host_short_chirp_cycles,
     input wire [15:0] host_short_listen_cycles,
+    // PR-G G2: MEDIUM ladder timings (was hardcoded to RP_DEF_MEDIUM_*)
+    input wire [15:0] host_medium_chirp_cycles,
+    input wire [15:0] host_medium_listen_cycles,
     input wire [5:0]  host_chirps_per_elev,
 
     // Digital gain control (Fix 3: between DDC output and matched filter)
@@ -221,11 +224,13 @@ wire mti_first_chirp;
 //    radar_mode_controller. SHORT/MEDIUM/LONG ladders + sub-frame walking
 //    + host-cued track dwell with watchdog scan-fallback.
 //
-//    Several inputs (medium/track/subframe-enable/debug) are pinned to
-//    radar_params defaults until PR-G plumbs the new USB opcodes through
-//    radar_system_top. host_chirps_per_elev (legacy) is intentionally not
-//    wired here — the V2 sub-frame structure uses RP_DEF_CHIRPS_PER_SUBFRAME
-//    (16) and PR-G renames the host register.
+//    PR-G G2: MEDIUM chirp/listen are now host-configurable via opcodes
+//    0x17/0x18, plumbed through host_medium_*_cycles. Track-mode + subframe-
+//    enable + debug-wave selectors remain pinned to radar_params defaults
+//    (single-mode SHORT track is the only HW-tested track variant; per-mode
+//    track waveform selection is a future feature, not part of PR-G).
+//    host_chirps_per_elev (legacy) is intentionally not wired here — the V2
+//    sub-frame structure uses RP_DEF_CHIRPS_PER_SUBFRAME (16) and is fixed.
 chirp_scheduler sched (
     .mixers_enable(mixers_enable_100m),
     .clk(clk),
@@ -234,8 +239,9 @@ chirp_scheduler sched (
     .host_subframe_enable(`RP_DEF_SUBFRAME_ENABLE),
     .host_short_chirp_cycles (host_short_chirp_cycles),
     .host_short_listen_cycles(host_short_listen_cycles),
-    .host_medium_chirp_cycles (16'd`RP_DEF_MEDIUM_CHIRP_CYCLES),
-    .host_medium_listen_cycles(16'd`RP_DEF_MEDIUM_LISTEN_CYCLES),
+    // PR-G G2: MEDIUM now flows from radar_system_top opcodes 0x17/0x18.
+    .host_medium_chirp_cycles (host_medium_chirp_cycles),
+    .host_medium_listen_cycles(host_medium_listen_cycles),
     .host_long_chirp_cycles (host_long_chirp_cycles),
     .host_long_listen_cycles(host_long_listen_cycles),
     .host_guard_cycles(host_guard_cycles),
