@@ -319,14 +319,15 @@ endmodule
 
 // ============================================================================
 // Stub xfft_2048 — replaces the production wrapper for this TB.
-// AUDIT-C10/C-8: cfg_tdata is 24-bit in scaled mode; tuser dropped with BFP.
+// AUDIT-C10/C-8 + PR-O.8: cfg_tdata is 16-bit in scaled mode (PG109 Pipelined
+// Streaming I/O); tuser dropped with BFP.
 // PR-O.7: AXIS data widened to 64-bit packed {Q[31:0], I[31:0]} so the IFFT
 // can carry the conjugate-mult Q30 product end-to-end.
 // ============================================================================
 module xfft_2048 (
     input  wire        aclk,
     input  wire        aresetn,
-    input  wire [23:0] s_axis_config_tdata,
+    input  wire [15:0] s_axis_config_tdata,
     input  wire        s_axis_config_tvalid,
     output wire        s_axis_config_tready,
     input  wire [63:0] s_axis_data_tdata,

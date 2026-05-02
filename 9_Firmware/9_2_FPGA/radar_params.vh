@@ -95,18 +95,33 @@
 // chain output (FFT·conj(FFT)·IFFT) is /N², predictable and per-frame
 // constant, so CFAR alpha calibrated in iverilog matches silicon counts.
 //
-// cfg_tdata layout per PG109 (1 channel, no CP, fixed NFFT, scaled):
-//   bit  0       = FWD/INV (1 = forward, 0 = inverse)
-//   bits[22:1]   = SCALE_SCH (22 bits)
-//   bit  23      = byte-align padding (0)
-// Total cfg_tdata width = 24 bits.
+// cfg_tdata layout per PG109 (1 channel, no CP, fixed NFFT, scaled,
+// Pipelined Streaming I/O architecture). The IP groups radix-2 stages
+// into radix-4-style pairs for scheduling — each 2-bit field covers a
+// pair of stages, so SCALE_SCH width = 2 * ceil(NFFT_MAX/2) = 12 bits
+// for NFFT_MAX=11. (PR-O.2 originally used the 22-bit Burst-I/O
+// layout — wrong for our Pipelined Streaming arch; corrected in
+// PR-O.8 commit after Vivado IP regen reported cfg_tdata=16.)
 //
-// The same schedule is replicated in fft_engine.v (iverilog fallback) by
-// applying convergent-rounding >>>1 at every BF_WRITE stage so absolute
-// counts agree between sim and silicon.
-`define RP_FFT_CFG_TDATA_W      24
-`define RP_FFT_SCALE_SCH_W      22
-`define RP_FFT_SCALE_SCH        22'h155555  // [01,01,01,01,01,01,01,01,01,01,01]
+//   bit  0       = FWD/INV (1 = forward, 0 = inverse)
+//   bits[12:1]   = SCALE_SCH (12 bits, LSB = stage 1 alone, then 5 pairs)
+//   bits[15:13]  = byte-align padding (0)
+// Total cfg_tdata width = 16 bits.
+//
+// SCALE_SCH = 12'hAA9 = 12'b10_10_10_10_10_01:
+//   stage 1 alone   bits[1:0]   = 2'b01 → >>1
+//   stages 2..3     bits[3:2]   = 2'b10 → >>2 (/4 across pair)
+//   stages 4..5     bits[5:4]   = 2'b10
+//   stages 6..7     bits[7:6]   = 2'b10
+//   stages 8..9     bits[9:8]   = 2'b10
+//   stages 10..11   bits[11:10] = 2'b10
+// Total shift = 1 + 5*2 = 11 = /N. The iverilog fft_engine.v fallback
+// applies >>>1 at every BF_WRITE (= /N total too) so absolute output
+// magnitudes match between sim and silicon for any /N-equivalent
+// schedule.
+`define RP_FFT_CFG_TDATA_W      16
+`define RP_FFT_SCALE_SCH_W      12
+`define RP_FFT_SCALE_SCH        12'hAA9
 
 // 3-ladder waveform identity (replaces 1-bit use_long_chirp rail in PR-C onward)
 // `define RP_WAVE_<NAME> values are 2-bit waveform selectors carried on

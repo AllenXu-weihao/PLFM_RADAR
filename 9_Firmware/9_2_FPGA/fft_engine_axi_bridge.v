@@ -20,10 +20,13 @@
 // LogiCORE Pipelined Streaming ~N + ~150-cycle pipeline. Functional behavior
 // is identical from the chain's view.
 //
-// AUDIT-C10/C-8: cfg_tdata carries SCALE_SCH+FWD/INV in scaled mode (24 bits).
-// Schedule = `RP_FFT_SCALE_SCH (radar_params.vh) = >>1 per stage = total /N.
-// Both the LogiCORE path and the iverilog fft_engine fallback honor the same
-// schedule, so absolute output magnitudes match between sim and silicon.
+// AUDIT-C10/C-8: cfg_tdata carries SCALE_SCH+FWD/INV in scaled mode. Layout
+// is 16 bits per PG109 Pipelined Streaming I/O (12-bit SCALE_SCH + 1-bit
+// FWD/INV + 3-bit padding); see radar_params.vh `RP_FFT_CFG_TDATA_W.
+// Schedule = `RP_FFT_SCALE_SCH = total /N (LogiCORE pair-grouped 2'b10s on
+// stages 2-11 + 2'b01 on stage 1; iverilog fft_engine applies >>>1 per stage
+// for the same total). Absolute output magnitudes match between sim and
+// silicon.
 //
 // PR-O.7 (2026-05-02): bridge widened to DATA_W=32 default and AXIS-data
 // 64-bit packed {Q[31:0], I[31:0]}. The matched-filter chain feeds the
@@ -63,7 +66,7 @@ module fft_engine_axi_bridge #(
 // ============================================================================
 localparam AXIS_W = 2 * DATA_W;   // 64 when DATA_W=32
 
-reg  [`RP_FFT_CFG_TDATA_W-1:0] cfg_tdata;   // 24 bits: {pad, SCALE_SCH, FWD/INV}
+reg  [`RP_FFT_CFG_TDATA_W-1:0] cfg_tdata;   // 16 bits: {3'b pad, 12'b SCALE_SCH, 1'b FWD/INV}
 reg                            cfg_tvalid;
 wire                           cfg_tready;
 
@@ -155,8 +158,9 @@ always @(posedge clk or negedge reset_n) begin
             skid_valid     <= 1'b0;
             if (start) begin
                 inverse_latched <= inverse;
-                // {pad[0], SCALE_SCH[21:0], FWD/INV[0]}; ~inverse so FWD=1.
-                cfg_tdata       <= {1'b0, `RP_FFT_SCALE_SCH, ~inverse};
+                // {pad[2:0], SCALE_SCH[11:0], FWD/INV[0]}; ~inverse so FWD=1.
+                // PG109 Pipelined Streaming I/O cfg_tdata = 16 bits total.
+                cfg_tdata       <= {3'b0, `RP_FFT_SCALE_SCH, ~inverse};
                 cfg_tvalid      <= 1'b1;
                 in_count        <= 0;
                 accept_count    <= 0;

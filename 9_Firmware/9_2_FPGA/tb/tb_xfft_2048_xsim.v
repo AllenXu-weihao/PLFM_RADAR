@@ -32,10 +32,12 @@ module tb_xfft_2048_xsim;
     reg         aclk      = 0;
     reg         aresetn   = 0;
 
-    // AUDIT-C10/C-8: cfg_tdata widened to 24 bits (scaled mode SCALE_SCH+FWD/INV).
-    // PR-O.7: data AXIS widened to 64-bit packed {Q[31:0], I[31:0]} —
-    // matches the regenerated xfft_2048_ip with input_width=32.
-    reg  [23:0] cfg_tdata;
+    // AUDIT-C10/C-8 + PR-O.8: cfg_tdata is 16 bits (scaled mode + Pipelined
+    // Streaming I/O — SCALE_SCH width = 2*ceil(NFFT_MAX/2) = 12 bits + 1 bit
+    // FWD/INV + 3 bits padding). PR-O.7: data AXIS widened to 64-bit
+    // packed {Q[31:0], I[31:0]} — matches the Vivado-regenerated
+    // xfft_2048_ip with input_width=32.
+    reg  [15:0] cfg_tdata;
     reg         cfg_tvalid;
     wire        cfg_tready;
 
@@ -101,8 +103,8 @@ module tb_xfft_2048_xsim;
         input fwd;
         begin
             @(posedge aclk);
-            // {pad[0], SCALE_SCH[21:0], FWD/INV[0]} — see radar_params.vh
-            cfg_tdata  <= {1'b0, `RP_FFT_SCALE_SCH, fwd};
+            // {pad[2:0], SCALE_SCH[11:0], FWD/INV[0]} — see radar_params.vh
+            cfg_tdata  <= {3'b0, `RP_FFT_SCALE_SCH, fwd};
             cfg_tvalid <= 1'b1;
             @(posedge aclk);
             while (!cfg_tready) @(posedge aclk);

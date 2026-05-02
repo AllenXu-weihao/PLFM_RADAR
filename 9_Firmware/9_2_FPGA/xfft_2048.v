@@ -25,11 +25,11 @@
 // >>15+saturate that crushed chirp/DC/impulse autocorrelations to zero under
 // deterministic /N scaling — see project_mf_chain_dynrange_defect_2026-05-02.
 //
-// Config tdata layout (24-bit, scaled mode — see AUDIT-C10/C-8 in
+// Config tdata layout (16-bit, scaled mode — see AUDIT-C10/C-8 in
 // radar_params.vh `RP_FFT_SCALE_SCH):
 //   bit  0     = FWD/INV   (1 = forward, 0 = inverse)
-//   bits[22:1] = SCALE_SCH (22 bits, fixed schedule from RP_FFT_SCALE_SCH)
-//   bit  23    = byte-align padding
+//   bits[12:1] = SCALE_SCH (12 bits, fixed schedule from RP_FFT_SCALE_SCH)
+//   bits[15:13]= byte-align padding
 //
 // Scaled mode replaces the previous Block-Floating-Point setting. BFP returned
 // a per-frame BLK_EXP on m_axis_data_tuser that the bridge dropped — sim and
@@ -42,9 +42,10 @@ module xfft_2048 (
     input  wire        aclk,
     input  wire        aresetn,
 
-    // Configuration channel (AXI-Stream slave). 24-bit tdata carries
-    // {pad, SCALE_SCH[21:0], FWD/INV}.
-    input  wire [23:0] s_axis_config_tdata,
+    // Configuration channel (AXI-Stream slave). 16-bit tdata carries
+    // {pad[2:0], SCALE_SCH[11:0], FWD/INV} per PG109 Pipelined Streaming I/O
+    // (PR-O.8: SCALE_SCH width is 2*ceil(NFFT_MAX/2)=12, not 2*NFFT_MAX).
+    input  wire [15:0] s_axis_config_tdata,
     input  wire        s_axis_config_tvalid,
     output wire        s_axis_config_tready,
 
