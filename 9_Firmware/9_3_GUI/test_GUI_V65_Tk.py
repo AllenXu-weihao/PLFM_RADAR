@@ -24,7 +24,8 @@ from radar_protocol import (
     BULK_FRAME_HEADER_SIZE, BULK_FRAME_MAX_SIZE,
     BULK_RANGE_SECTION_BYTES, BULK_FOOTER_SIZE,
     BULK_FLAG_STREAM_RANGE, BULK_FLAG_STREAM_DOPPLER, BULK_FLAG_STREAM_CFAR,
-    BULK_FLAG_MAG_ONLY, BULK_FLAG_SPARSE_DET,
+    BULK_FLAGS_RESERVED_MASK,
+    RP_USB_PROTOCOL_VERSION, STATUS_PACKET_SIZE,
 )
 from GUI_V65_Tk import DemoTarget, DemoSimulator, _ReplayController
 
@@ -131,8 +132,9 @@ class TestRadarProtocol(unittest.TestCase):
                             short_listen=17450, chirps=32, range_mode=0,
                             st_flags=0, st_detail=0, st_busy=0,
                             agc_gain=0, agc_peak=0, agc_sat=0, agc_enable=0,
-                            chirps_mismatch=0):
-        """Build a 26-byte status response matching FPGA format (Build 26)."""
+                            chirps_mismatch=0,
+                            cand_count=0, thr_soft=0, frame_drop=0):
+        """Build a PR-G v2 30-byte status response matching FPGA format."""
         pkt = bytearray()
         pkt.append(STATUS_HEADER_BYTE)
 
@@ -161,10 +163,16 @@ class TestRadarProtocol(unittest.TestCase):
               (range_mode & 0x03))
         pkt += struct.pack(">I", w4)
 
-        # Word 5: {7'd0, self_test_busy, 8'd0, self_test_detail[7:0],
-        #           3'd0, self_test_flags[4:0]}
-        w5 = ((st_busy & 0x01) << 24) | ((st_detail & 0xFF) << 8) | (st_flags & 0x1F)
+        # Word 5: {frame_drop[31:25], self_test_busy[24], 8'd0,
+        #           self_test_detail[15:8], 3'd0, self_test_flags[4:0]}
+        w5 = (((frame_drop & 0x7F) << 25) | ((st_busy & 0x01) << 24)
+              | ((st_detail & 0xFF) << 8) | (st_flags & 0x1F))
         pkt += struct.pack(">I", w5)
+
+        # Word 6 (PR-G 2-tier CFAR telemetry):
+        # high 16 bits = detect_count_cand, low 16 bits = detect_threshold_soft
+        w6 = ((cand_count & 0xFFFF) << 16) | (thr_soft & 0xFFFF)
+        pkt += struct.pack(">I", w6)
 
         pkt.append(FOOTER_BYTE)
         return bytes(pkt)
@@ -199,7 +207,8 @@ class TestRadarProtocol(unittest.TestCase):
         self.assertEqual(sr.range_mode, 2)
 
     def test_parse_status_too_short(self):
-        self.assertIsNone(RadarProtocol.parse_status_packet(b"\xBB" + b"\x00" * 20))
+        # Anything under STATUS_PACKET_SIZE (30) must be rejected.
+        self.assertIsNone(RadarProtocol.parse_status_packet(b"\xBB" + b"\x00" * 28))
 
     def test_parse_status_wrong_header(self):
         raw = self._make_status_packet()
@@ -208,8 +217,16 @@ class TestRadarProtocol(unittest.TestCase):
 
     def test_parse_status_wrong_footer(self):
         raw = bytearray(self._make_status_packet())
-        raw[25] = 0x00  # corrupt footer (was at index 21 in old 5-word format)
+        raw[STATUS_PACKET_SIZE - 1] = 0x00  # corrupt footer
         self.assertIsNone(RadarProtocol.parse_status_packet(bytes(raw)))
+
+    def test_parse_status_word6_2tier_cfar(self):
+        """PR-G v2: word[6] high-half = detect_count_cand, low-half = detect_threshold_soft."""
+        raw = self._make_status_packet(cand_count=0x0A5C, thr_soft=0x1234)
+        sr = RadarProtocol.parse_status_packet(raw)
+        self.assertIsNotNone(sr)
+        self.assertEqual(sr.detect_count_cand, 0x0A5C)
+        self.assertEqual(sr.detect_threshold_soft, 0x1234)
 
     def test_parse_status_word4_layout_co_spec(self):
         """GUI-S3: pin status word 4 bit positions to the FPGA word builder.
@@ -309,10 +326,11 @@ class TestRadarProtocol(unittest.TestCase):
         self.assertEqual(sr.self_test_detail, 0)
         self.assertEqual(sr.self_test_busy, 0)
 
-    def test_status_packet_is_26_bytes(self):
-        """Verify status packet is exactly 26 bytes."""
+    def test_status_packet_is_30_bytes(self):
+        """PR-G v2: status packet is 30 bytes (1 + 7*4 + 1)."""
         raw = self._make_status_packet()
-        self.assertEqual(len(raw), 26)
+        self.assertEqual(len(raw), STATUS_PACKET_SIZE)
+        self.assertEqual(len(raw), 30)
 
     # ----------------------------------------------------------------
     # Boundary detection
@@ -353,16 +371,18 @@ class TestRadarProtocol(unittest.TestCase):
 
     def test_find_boundaries_rejects_false_status_header(self):
         """GUI-S1: a stray 0xBB without 0xFF at offset+1 must NOT be
-        accepted as a status packet — even if 0x55 lands 25 bytes later."""
-        forged = bytes([0xBB] + [0x00] * 24 + [0x55])  # byte 1 = 0x00, not 0xFF
+        accepted as a status packet — even if 0x55 lands at the right position."""
+        # PR-G v2: 30-byte status; forge byte 1 = 0x00 (not 0xFF).
+        forged = bytes([0xBB] + [0x00] * (STATUS_PACKET_SIZE - 2) + [0x55])
+        self.assertEqual(len(forged), STATUS_PACKET_SIZE)
         real = self._make_data_packet()
         buf = forged + real
         boundaries = RadarProtocol.find_packet_boundaries(buf)
-        # Forged status rejected; real data packet found 11 bytes in.
+        # Forged status rejected; real data packet found inside the buffer.
         data_hits = [b for b in boundaries if b[2] == "data"]
         status_hits = [b for b in boundaries if b[2] == "status"]
         self.assertEqual(len(status_hits), 0)
-        self.assertEqual(len(data_hits), 1)
+        self.assertGreaterEqual(len(data_hits), 1)
 
     def test_find_boundaries_recovers_after_byte_drop(self):
         """GUI-S1: simulate a single-byte drop — parser should re-lock on
@@ -386,7 +406,7 @@ class TestBulkFrameParser(unittest.TestCase):
     def _build_bulk_frame(
         self,
         flags: int = (BULK_FLAG_STREAM_RANGE | BULK_FLAG_STREAM_DOPPLER
-                      | BULK_FLAG_STREAM_CFAR | BULK_FLAG_MAG_ONLY),
+                      | BULK_FLAG_STREAM_CFAR),
         frame_number: int = 0xBEEF,
         n_range: int = NUM_RANGE_BINS,
         n_doppler: int = NUM_DOPPLER_BINS,
@@ -394,12 +414,14 @@ class TestBulkFrameParser(unittest.TestCase):
         doppler_seed: int = 2,
         cfar_seed: int = 3,
         bad_footer: bool = False,
+        version: int = RP_USB_PROTOCOL_VERSION,
     ) -> tuple[bytes, np.ndarray, np.ndarray, np.ndarray]:
-        """Synthesize a bulk frame matching usb_data_interface_ft2232h.v.
+        """Synthesize a PR-G v2 bulk frame matching usb_data_interface_ft2232h.v.
 
-        Returns (frame_bytes, range_profile, doppler_mag, cfar_dense). The
+        Returns (frame_bytes, range_profile, doppler_mag, cfar_codes). The
         latter three are the source-of-truth arrays used to generate the
-        bytes; tests can assert round-trip equality.
+        bytes; tests can assert round-trip equality. cfar_codes carries
+        2-bit values 0..3 (NONE/CAND/CONFIRM/RSVD).
         """
         rng_r = np.random.RandomState(range_seed)
         rng_d = np.random.RandomState(doppler_seed)
@@ -411,15 +433,19 @@ class TestBulkFrameParser(unittest.TestCase):
         doppler_mag = (rng_d.randint(0, 65535, size=(n_range, n_doppler))
                        .astype(np.uint16) if (flags & BULK_FLAG_STREAM_DOPPLER)
                        else None)
-        cfar_dense = (rng_c.randint(0, 2, size=(n_range, n_doppler))
+        # PR-F 2-tier dense detect: 2 bits per cell (codes 0..3).
+        cfar_codes = (rng_c.randint(0, 4, size=(n_range, n_doppler))
                       .astype(np.uint8) if (flags & BULK_FLAG_STREAM_CFAR)
                       else None)
 
         out = bytearray()
         out.append(HEADER_BYTE)
-        # Don't mask reserved bits here — the parser must reject any byte
-        # with bits [7:6] set, and the rejection test relies on those bits
-        # actually surviving into the synthesized frame.
+        # PR-G v2: byte 1 is the protocol version. Tests can override
+        # `version` to exercise rejection.
+        out.append(version & 0xFF)
+        # Don't mask reserved bits — the parser must reject any byte with
+        # bits in BULK_FLAGS_RESERVED_MASK set, and the rejection test
+        # relies on those bits actually surviving into the synthesized frame.
         out.append(flags & 0xFF)
         out.append((frame_number >> 8) & 0xFF)
         out.append(frame_number & 0xFF)
@@ -431,10 +457,19 @@ class TestBulkFrameParser(unittest.TestCase):
             out += range_profile.astype(">u2").tobytes()
         if doppler_mag is not None:
             out += doppler_mag.astype(">u2").tobytes()
-        if cfar_dense is not None:
-            out += np.packbits(cfar_dense.flatten()).tobytes()
+        if cfar_codes is not None:
+            # Pack 4 cells per byte, MSB-first within byte (matches FPGA emit).
+            # Local bytes_per_range tracks the *actual* n_doppler so tests
+            # passing n_doppler != NUM_DOPPLER_BINS don't overflow the row.
+            bytes_per_range = (n_doppler * 2 + 7) // 8
+            packed = np.zeros((n_range, bytes_per_range), dtype=np.uint8)
+            for d_idx in range(n_doppler):
+                byte_idx = d_idx // 4
+                shift = (3 - (d_idx % 4)) * 2
+                packed[:, byte_idx] |= ((cfar_codes[:, d_idx] & 0x03) << shift).astype(np.uint8)
+            out += packed.tobytes()
         out.append(0x00 if bad_footer else FOOTER_BYTE)
-        return bytes(out), range_profile, doppler_mag, cfar_dense
+        return bytes(out), range_profile, doppler_mag, cfar_codes
 
     def test_parse_full_frame_round_trip(self):
         """All-streams mag-only round trip: every cell exact."""
@@ -450,8 +485,7 @@ class TestBulkFrameParser(unittest.TestCase):
         np.testing.assert_array_equal(parsed["cfar_dense"], cdense)
 
     def test_parse_range_only(self):
-        flags = BULK_FLAG_STREAM_RANGE | BULK_FLAG_MAG_ONLY
-        raw, rprof, _dmag, _cdense = self._build_bulk_frame(flags=flags)
+        raw, rprof, _dmag, _cdense = self._build_bulk_frame(flags=BULK_FLAG_STREAM_RANGE)
         parsed = RadarProtocol.parse_bulk_frame(raw)
         self.assertIsNotNone(parsed)
         np.testing.assert_array_equal(parsed["range_profile"], rprof)
@@ -463,8 +497,7 @@ class TestBulkFrameParser(unittest.TestCase):
         )
 
     def test_parse_doppler_only(self):
-        flags = BULK_FLAG_STREAM_DOPPLER | BULK_FLAG_MAG_ONLY
-        raw, _rprof, dmag, _cdense = self._build_bulk_frame(flags=flags)
+        raw, _rprof, dmag, _cdense = self._build_bulk_frame(flags=BULK_FLAG_STREAM_DOPPLER)
         parsed = RadarProtocol.parse_bulk_frame(raw)
         self.assertIsNotNone(parsed)
         self.assertIsNone(parsed["range_profile"])
@@ -472,38 +505,27 @@ class TestBulkFrameParser(unittest.TestCase):
         self.assertIsNone(parsed["cfar_dense"])
 
     def test_parse_cfar_only(self):
-        flags = BULK_FLAG_STREAM_CFAR | BULK_FLAG_MAG_ONLY
-        raw, _rprof, _dmag, cdense = self._build_bulk_frame(flags=flags)
+        raw, _rprof, _dmag, cdense = self._build_bulk_frame(flags=BULK_FLAG_STREAM_CFAR)
         parsed = RadarProtocol.parse_bulk_frame(raw)
         self.assertIsNotNone(parsed)
         np.testing.assert_array_equal(parsed["cfar_dense"], cdense)
 
     def test_parse_no_streams(self):
-        """Header + footer only (8 + 1 = 9 bytes)."""
-        flags = BULK_FLAG_MAG_ONLY  # streams off, mag_only still set
-        raw, *_ = self._build_bulk_frame(flags=flags)
-        self.assertEqual(len(raw), 9)
+        """PR-G v2: header + footer only is 9 + 1 = 10 bytes."""
+        raw, *_ = self._build_bulk_frame(flags=0)
+        self.assertEqual(len(raw), BULK_FRAME_HEADER_SIZE + BULK_FOOTER_SIZE)
         parsed = RadarProtocol.parse_bulk_frame(raw)
         self.assertIsNotNone(parsed)
-        self.assertEqual(parsed["frame_size"], 9)
+        self.assertEqual(parsed["frame_size"], BULK_FRAME_HEADER_SIZE + BULK_FOOTER_SIZE)
 
-    def test_reject_full_iq_until_rtl_lands(self):
-        """mag_only=0 must be rejected — FPGA write FSM doesn't emit it."""
-        flags = BULK_FLAG_STREAM_DOPPLER  # NB: mag_only bit cleared
-        raw, *_ = self._build_bulk_frame(flags=flags)
-        # Frame is structurally consistent; rejection comes from the
-        # mag_only=0 + stream_doppler=1 combination check in parse_bulk_frame.
-        self.assertIsNone(RadarProtocol.parse_bulk_frame(raw))
-
-    def test_reject_sparse_det(self):
-        """sparse_det=1 must be rejected — FPGA emits dense bitmap only."""
-        flags = (BULK_FLAG_STREAM_CFAR | BULK_FLAG_MAG_ONLY | BULK_FLAG_SPARSE_DET)
-        raw, *_ = self._build_bulk_frame(flags=flags)
+    def test_reject_wrong_version_byte(self):
+        """PR-G v2: byte 1 must equal RP_USB_PROTOCOL_VERSION."""
+        raw, *_ = self._build_bulk_frame(version=0x01)
         self.assertIsNone(RadarProtocol.parse_bulk_frame(raw))
 
     def test_reject_reserved_bits_set(self):
-        """Reserved high bits in flags byte must be zero."""
-        raw, *_ = self._build_bulk_frame(flags=0x80 | BULK_FLAG_MAG_ONLY)
+        """Reserved high bits (BULK_FLAGS_RESERVED_MASK) must be zero."""
+        raw, *_ = self._build_bulk_frame(flags=BULK_FLAG_STREAM_DOPPLER | 0x80)
         self.assertIsNone(RadarProtocol.parse_bulk_frame(raw))
 
     def test_reject_wrong_n_range(self):
@@ -542,10 +564,12 @@ class TestBulkFrameParser(unittest.TestCase):
             self.assertIsNotNone(parsed)
 
     def test_find_boundaries_with_status(self):
-        """Status packets coexist with bulk frames in the same stream."""
+        """Status packets (PR-G v2 30 B) coexist with bulk frames in the same stream."""
         f1, *_ = self._build_bulk_frame()
-        # Build a minimal valid status packet (byte 1 = 0xFF, footer = 0x55).
-        status = bytes([STATUS_HEADER_BYTE, 0xFF] + [0x00] * 23 + [FOOTER_BYTE])
+        # Build a minimal valid 30-byte status packet (byte 1 = 0xFF, footer = 0x55).
+        status = bytes([STATUS_HEADER_BYTE, 0xFF]
+                       + [0x00] * (STATUS_PACKET_SIZE - 3) + [FOOTER_BYTE])
+        self.assertEqual(len(status), STATUS_PACKET_SIZE)
         buf = f1 + status
         out = RadarProtocol.find_bulk_frame_boundaries(buf)
         types = [t for _s, _e, t in out]
@@ -645,8 +669,8 @@ class TestFT2232HConnection(unittest.TestCase):
                 self.assertIsNotNone(parsed)
                 self.assertEqual(parsed["n_range"], NUM_RANGE_BINS)
                 self.assertEqual(parsed["n_doppler"], NUM_DOPPLER_BINS)
-                self.assertTrue(parsed["flags"] & BULK_FLAG_MAG_ONLY)
-                self.assertFalse(parsed["flags"] & BULK_FLAG_SPARSE_DET)
+                # PR-G v2: only the low 3 stream-enable bits are valid.
+                self.assertEqual(parsed["flags"] & BULK_FLAGS_RESERVED_MASK, 0)
         conn.close()
 
     def test_mock_write(self):

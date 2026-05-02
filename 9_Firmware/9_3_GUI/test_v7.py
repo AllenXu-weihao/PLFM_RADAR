@@ -354,6 +354,177 @@ class TestRadarDataWorkerInit(unittest.TestCase):
 
 
 # =============================================================================
+# Test: radar_protocol PR-G v2 bulk frame + status round-trip
+# Audit P-2/P-3: GUI parser must agree byte-for-byte with the FPGA emit
+# (usb_data_interface_ft2232h.v). Build synthetic frames the way the FPGA
+# does, then parse them back and check every field. Catches:
+#   - 8 vs 9 byte header (version byte at offset 1)
+#   - reserved-bit mask 0xC0 vs 0xF8
+#   - 1-bit vs 2-bit detect packing
+#   - 26 vs 30 byte status, 6 vs 7 status_words
+# =============================================================================
+
+class TestBulkFrameV2RoundTrip(unittest.TestCase):
+    """PR-G v2 bulk frame: build synthetic FPGA emit, parse back, check."""
+
+    def _build_v2_frame(self, flags: int, frame_num: int = 0,
+                        doppler: np.ndarray | None = None,
+                        cfar_codes: np.ndarray | None = None,
+                        range_profile: np.ndarray | None = None) -> bytes:
+        """Construct a v2 frame the way usb_data_interface_ft2232h.v emits."""
+        from radar_protocol import (
+            HEADER_BYTE, FOOTER_BYTE, RP_USB_PROTOCOL_VERSION,
+            NUM_RANGE_BINS, NUM_DOPPLER_BINS,
+            BULK_FLAG_STREAM_RANGE, BULK_FLAG_STREAM_DOPPLER, BULK_FLAG_STREAM_CFAR,
+            BULK_DETECT_BYTES_PER_RANGE,
+        )
+        parts = [
+            bytes([HEADER_BYTE, RP_USB_PROTOCOL_VERSION, flags & 0xFF]),
+            struct.pack(">H", frame_num),
+            struct.pack(">H", NUM_RANGE_BINS),
+            struct.pack(">H", NUM_DOPPLER_BINS),
+        ]
+        if flags & BULK_FLAG_STREAM_RANGE:
+            rp = (range_profile if range_profile is not None
+                  else np.arange(NUM_RANGE_BINS, dtype=np.uint16))
+            parts.append(rp.astype(">u2").tobytes())
+        if flags & BULK_FLAG_STREAM_DOPPLER:
+            d = (doppler if doppler is not None
+                 else np.zeros((NUM_RANGE_BINS, NUM_DOPPLER_BINS), dtype=np.uint16))
+            parts.append(d.astype(">u2").tobytes())
+        if flags & BULK_FLAG_STREAM_CFAR:
+            codes = (cfar_codes if cfar_codes is not None
+                     else np.zeros((NUM_RANGE_BINS, NUM_DOPPLER_BINS), dtype=np.uint8))
+            # Pack 4 cells per byte, MSB-first within byte
+            packed = np.zeros((NUM_RANGE_BINS, BULK_DETECT_BYTES_PER_RANGE), dtype=np.uint8)
+            for d_idx in range(NUM_DOPPLER_BINS):
+                byte_idx = d_idx // 4
+                shift = (3 - (d_idx % 4)) * 2  # MSB-first
+                packed[:, byte_idx] |= ((codes[:, d_idx] & 0x03) << shift).astype(np.uint8)
+            parts.append(packed.tobytes())
+        parts.append(bytes([FOOTER_BYTE]))
+        return b"".join(parts)
+
+    def test_full_frame_round_trip(self):
+        from radar_protocol import (
+            RadarProtocol, NUM_RANGE_BINS, NUM_DOPPLER_BINS,
+            BULK_FLAG_STREAM_RANGE, BULK_FLAG_STREAM_DOPPLER, BULK_FLAG_STREAM_CFAR,
+            BULK_FRAME_HEADER_SIZE,
+        )
+        # Synthetic detection map: scatter all 4 codes across the grid
+        codes = np.zeros((NUM_RANGE_BINS, NUM_DOPPLER_BINS), dtype=np.uint8)
+        codes[10, 5] = 1   # CAND
+        codes[100, 17] = 2  # CONFIRM
+        codes[300, 47] = 3  # reserved (still legal on the wire)
+        doppler = np.full((NUM_RANGE_BINS, NUM_DOPPLER_BINS), 1234, dtype=np.uint16)
+        rp = np.arange(NUM_RANGE_BINS, dtype=np.uint16)
+
+        flags = (BULK_FLAG_STREAM_RANGE | BULK_FLAG_STREAM_DOPPLER
+                 | BULK_FLAG_STREAM_CFAR)
+        frame = self._build_v2_frame(flags, frame_num=42,
+                                      doppler=doppler, cfar_codes=codes,
+                                      range_profile=rp)
+        # 9 + 1024 + 49152 + 6144 + 1 = 56330
+        self.assertEqual(len(frame), BULK_FRAME_HEADER_SIZE + 1024 + 49152 + 6144 + 1)
+        self.assertEqual(BULK_FRAME_HEADER_SIZE, 9)
+
+        parsed = RadarProtocol.parse_bulk_frame(frame)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["frame_number"], 42)
+        self.assertEqual(parsed["flags"], flags)
+        self.assertEqual(parsed["n_range"], NUM_RANGE_BINS)
+        self.assertEqual(parsed["n_doppler"], NUM_DOPPLER_BINS)
+        np.testing.assert_array_equal(parsed["range_profile"], rp)
+        np.testing.assert_array_equal(parsed["doppler_mag"], doppler)
+        np.testing.assert_array_equal(parsed["cfar_dense"], codes)
+
+    def test_reject_wrong_version_byte(self):
+        from radar_protocol import RadarProtocol
+        frame = self._build_v2_frame(0x07)
+        # Corrupt the version byte
+        bad = bytes([frame[0], 0x01]) + frame[2:]
+        self.assertIsNone(RadarProtocol.parse_bulk_frame(bad))
+
+    def test_reject_reserved_flag_bits(self):
+        from radar_protocol import RadarProtocol
+        # Set bit 7 (reserved); byte order: HEADER, ver, flags
+        frame = self._build_v2_frame(0x07)
+        bad = bytes([frame[0], frame[1], frame[2] | 0x80]) + frame[3:]
+        self.assertIsNone(RadarProtocol.parse_bulk_frame(bad))
+
+    def test_detect_2bit_codes_independently(self):
+        """Each cell decodes to the same 2-bit code that was packed."""
+        from radar_protocol import (
+            RadarProtocol, NUM_RANGE_BINS, NUM_DOPPLER_BINS,
+            BULK_FLAG_STREAM_CFAR,
+        )
+        # All four codes in adjacent cells of the same byte
+        codes = np.zeros((NUM_RANGE_BINS, NUM_DOPPLER_BINS), dtype=np.uint8)
+        codes[0, 0] = 0
+        codes[0, 1] = 1
+        codes[0, 2] = 2
+        codes[0, 3] = 3
+        frame = self._build_v2_frame(BULK_FLAG_STREAM_CFAR, cfar_codes=codes)
+        parsed = RadarProtocol.parse_bulk_frame(frame)
+        self.assertEqual(parsed["cfar_dense"][0, 0], 0)
+        self.assertEqual(parsed["cfar_dense"][0, 1], 1)
+        self.assertEqual(parsed["cfar_dense"][0, 2], 2)
+        self.assertEqual(parsed["cfar_dense"][0, 3], 3)
+
+    def test_find_boundaries_on_back_to_back_frames(self):
+        from radar_protocol import (
+            RadarProtocol, BULK_FLAG_STREAM_DOPPLER, BULK_FLAG_STREAM_CFAR,
+        )
+        flags = BULK_FLAG_STREAM_DOPPLER | BULK_FLAG_STREAM_CFAR
+        f1 = self._build_v2_frame(flags, frame_num=1)
+        f2 = self._build_v2_frame(flags, frame_num=2)
+        boundaries = RadarProtocol.find_bulk_frame_boundaries(f1 + f2)
+        self.assertEqual(len(boundaries), 2)
+        self.assertEqual(boundaries[0], (0, len(f1), "data"))
+        self.assertEqual(boundaries[1], (len(f1), len(f1) + len(f2), "data"))
+
+
+class TestStatusPacketV2RoundTrip(unittest.TestCase):
+    """PR-G v2 status packet: 7 status_words / 30 bytes."""
+
+    def _build_status(self, words: list[int]) -> bytes:
+        from radar_protocol import STATUS_HEADER_BYTE, FOOTER_BYTE
+        assert len(words) == 7
+        body = b"".join(struct.pack(">I", w & 0xFFFFFFFF) for w in words)
+        return bytes([STATUS_HEADER_BYTE]) + body + bytes([FOOTER_BYTE])
+
+    def test_size_is_30(self):
+        from radar_protocol import STATUS_PACKET_SIZE
+        self.assertEqual(STATUS_PACKET_SIZE, 30)
+        pkt = self._build_status([0] * 7)
+        self.assertEqual(len(pkt), 30)
+
+    def test_word6_telemetry_decoded(self):
+        """word[6] = {detect_count_cand[31:16], detect_threshold_soft[15:0]}"""
+        from radar_protocol import RadarProtocol
+        word6 = (0x1234 << 16) | 0xABCD  # cand=0x1234, thr_soft=0xABCD
+        pkt = self._build_status([0, 0, 0, 0, 0, 0, word6])
+        sr = RadarProtocol.parse_status_packet(pkt)
+        self.assertIsNotNone(sr)
+        self.assertEqual(sr.detect_count_cand, 0x1234)
+        self.assertEqual(sr.detect_threshold_soft, 0xABCD)
+
+    def test_short_packet_returns_none(self):
+        from radar_protocol import RadarProtocol
+        pkt = self._build_status([0] * 7)
+        self.assertIsNone(RadarProtocol.parse_status_packet(pkt[:25]))
+
+    def test_pre_PR_G_26byte_packet_rejected(self):
+        """Old 26-byte status packets must NOT silently parse — they're stale."""
+        from radar_protocol import RadarProtocol, STATUS_HEADER_BYTE, FOOTER_BYTE
+        # Build a 26-byte packet (legacy format).
+        old_pkt = (bytes([STATUS_HEADER_BYTE])
+                   + b"\x00" * 24 + bytes([FOOTER_BYTE]))
+        self.assertEqual(len(old_pkt), 26)
+        self.assertIsNone(RadarProtocol.parse_status_packet(old_pkt))
+
+
+# =============================================================================
 # Test: v7.__init__ — clean exports
 # =============================================================================
 
