@@ -41,6 +41,7 @@ from PyQt6.QtWidgets import (
     QPlainTextEdit, QStatusBar, QMessageBox,
 )
 from PyQt6.QtCore import Qt, QLocale, QTimer, pyqtSignal, pyqtSlot, QObject
+from PyQt6.QtGui import QColor
 
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
@@ -85,6 +86,31 @@ def _make_dspin() -> QDoubleSpinBox:
     sb = QDoubleSpinBox()
     sb.setLocale(_C_LOCALE)
     return sb
+
+
+# Confidence label colors for the targets table (PR-Q.7 / audit M-1).
+# CONFIRMED  green  — 3 sub-frames agreed via CRT
+# LIKELY     amber  — 2 of 3 sub-frames agreed
+# AMBIGUOUS  red    — only 1 sub-frame saw it; v_unamb-bounded reading
+# UNKNOWN    gray   — legacy 32-bin frame (no CRT was attempted)
+_CONFIDENCE_COLORS: dict[str, str] = {
+    "CONFIRMED": DARK_SUCCESS,
+    "LIKELY":    DARK_WARNING,
+    "AMBIGUOUS": DARK_ERROR,
+    "UNKNOWN":   DARK_TEXT,
+}
+
+
+def _confidence_display(confidence: str) -> tuple[str, QColor]:
+    """Map a RadarTarget.velocity_confidence string to (cell text, QColor).
+
+    AMBIGUOUS gets a leading "?" so it stands out in a long target list even
+    if the operator's eyes skip the color cue. Unknown confidence labels
+    (e.g. from a future model) fall back to "UNKNOWN" gray.
+    """
+    label = confidence if confidence in _CONFIDENCE_COLORS else "UNKNOWN"
+    text = f"? {label}" if label == "AMBIGUOUS" else label
+    return text, QColor(_CONFIDENCE_COLORS[label])
 
 
 # =============================================================================
@@ -486,9 +512,10 @@ class RadarDashboard(QMainWindow):
         tg_layout = QVBoxLayout(targets_group)
 
         self._targets_table_main = QTableWidget()
-        self._targets_table_main.setColumnCount(5)
+        self._targets_table_main.setColumnCount(6)
         self._targets_table_main.setHorizontalHeaderLabels([
-            "Range (m)", "Velocity (m/s)", "Magnitude", "SNR (dB)", "Track ID",
+            "Range (m)", "Velocity (m/s)", "Confidence",
+            "Magnitude", "SNR (dB)", "Track ID",
         ])
         self._targets_table_main.setAlternatingRowColors(True)
         self._targets_table_main.setSelectionBehavior(
@@ -1961,16 +1988,31 @@ class RadarDashboard(QMainWindow):
         for row, t in enumerate(targets):
             self._targets_table_main.setItem(
                 row, 0, QTableWidgetItem(f"{t.range:.0f}"))
-            self._targets_table_main.setItem(
-                row, 1, QTableWidgetItem(f"{t.velocity:.0f}"))
+
+            # PR-Q.7: velocity cell carries an alias-set tooltip so the operator
+            # can hover to see all CRT candidate folds; useful when confidence
+            # is LIKELY/AMBIGUOUS and the displayed velocity is just the best
+            # of several plausible v_true values.
+            vel_item = QTableWidgetItem(f"{t.velocity:.0f}")
+            if t.alias_set:
+                fold_strs = ", ".join(f"{v:+.1f}" for v in t.alias_set)
+                vel_item.setToolTip(f"CRT alias folds (m/s): {fold_strs}")
+            self._targets_table_main.setItem(row, 1, vel_item)
+
+            # PR-Q.7: confidence column. CONFIRMED = green, LIKELY = amber,
+            # AMBIGUOUS = red with leading "?", UNKNOWN = gray (legacy single-PRI).
+            conf_text, conf_color = _confidence_display(t.velocity_confidence)
+            conf_item = QTableWidgetItem(conf_text)
+            conf_item.setForeground(conf_color)
+            self._targets_table_main.setItem(row, 2, conf_item)
 
             mag_val = 10 ** (t.snr / 10) if t.snr > 0 else 0
             self._targets_table_main.setItem(
-                row, 2, QTableWidgetItem(f"{mag_val:.0f}"))
+                row, 3, QTableWidgetItem(f"{mag_val:.0f}"))
             self._targets_table_main.setItem(
-                row, 3, QTableWidgetItem(f"{t.snr:.1f}"))
+                row, 4, QTableWidgetItem(f"{t.snr:.1f}"))
             self._targets_table_main.setItem(
-                row, 4, QTableWidgetItem(str(t.track_id)))
+                row, 5, QTableWidgetItem(str(t.track_id)))
 
     def _update_diagnostics(self):
         # Connection indicators

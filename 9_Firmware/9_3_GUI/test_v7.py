@@ -1582,6 +1582,52 @@ class TestWorkersRouteThroughCrt(unittest.TestCase):
 
 
 # =============================================================================
+# Test: PR-Q.7 / audit M-1 — dashboard confidence column display helper
+# =============================================================================
+
+@unittest.skipUnless(_pyqt6_available(), "PyQt6 not installed")
+class TestDashboardConfidenceDisplay(unittest.TestCase):
+    """_confidence_display maps RadarTarget.velocity_confidence to (text, QColor)."""
+
+    def test_confirmed_is_green_no_prefix(self):
+        from v7.dashboard import _confidence_display
+        from v7.models import DARK_SUCCESS
+        text, color = _confidence_display("CONFIRMED")
+        self.assertEqual(text, "CONFIRMED")
+        self.assertEqual(color.name().upper(), DARK_SUCCESS.upper())
+
+    def test_likely_is_amber(self):
+        from v7.dashboard import _confidence_display
+        from v7.models import DARK_WARNING
+        text, color = _confidence_display("LIKELY")
+        self.assertEqual(text, "LIKELY")
+        self.assertEqual(color.name().upper(), DARK_WARNING.upper())
+
+    def test_ambiguous_gets_question_mark_prefix_and_red(self):
+        from v7.dashboard import _confidence_display
+        from v7.models import DARK_ERROR
+        text, color = _confidence_display("AMBIGUOUS")
+        self.assertTrue(text.startswith("?"),
+                        "AMBIGUOUS must lead with '?' so it's visible without color")
+        self.assertIn("AMBIGUOUS", text)
+        self.assertEqual(color.name().upper(), DARK_ERROR.upper())
+
+    def test_unknown_falls_back_to_text_color(self):
+        from v7.dashboard import _confidence_display
+        from v7.models import DARK_TEXT
+        text, color = _confidence_display("UNKNOWN")
+        self.assertEqual(text, "UNKNOWN")
+        self.assertEqual(color.name().upper(), DARK_TEXT.upper())
+
+    def test_unrecognised_label_falls_through_to_unknown(self):
+        from v7.dashboard import _confidence_display
+        from v7.models import DARK_TEXT
+        text, color = _confidence_display("BANANA")
+        self.assertEqual(text, "UNKNOWN")
+        self.assertEqual(color.name().upper(), DARK_TEXT.upper())
+
+
+# =============================================================================
 # Helper: lazy import of v7.models
 # =============================================================================
 
