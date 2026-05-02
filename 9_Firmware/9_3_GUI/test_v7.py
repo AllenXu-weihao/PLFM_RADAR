@@ -629,23 +629,23 @@ class TestSoftwareFPGASignalChain(unittest.TestCase):
         return os.path.isfile(os.path.join(self.COSIM_DIR, "doppler_map_i.npy"))
 
     def test_process_chirps_returns_radar_frame(self):
-        """process_chirps produces a RadarFrame with correct shapes."""
+        """process_chirps produces a RadarFrame with production shapes (PR-O.6 / PR-F)."""
         if not self._cosim_available():
             self.skipTest("co-sim data not found")
         from v7.software_fpga import SoftwareFPGA
-        from radar_protocol import RadarFrame
+        from radar_protocol import RadarFrame, NUM_RANGE_BINS, NUM_DOPPLER_BINS
 
-        # Load decimated range data as minimal input (32 chirps x 64 bins)
+        # Load decimated range data and pad up to current FPGA chirp width.
         dec_i = np.load(os.path.join(self.COSIM_DIR, "decimated_range_i.npy"))
         dec_q = np.load(os.path.join(self.COSIM_DIR, "decimated_range_q.npy"))
 
-        # Build fake 1024-sample chirps from decimated data (pad with zeros)
+        # Production chirp width = FFT_SIZE = 2048 samples; pad with zeros.
         n_chirps = dec_i.shape[0]
-        iq_i = np.zeros((n_chirps, 1024), dtype=np.int64)
-        iq_q = np.zeros((n_chirps, 1024), dtype=np.int64)
-        # Put decimated data into first 64 bins so FFT has something
-        iq_i[:, :dec_i.shape[1]] = dec_i
-        iq_q[:, :dec_q.shape[1]] = dec_q
+        iq_i = np.zeros((n_chirps, 2048), dtype=np.int64)
+        iq_q = np.zeros((n_chirps, 2048), dtype=np.int64)
+        n_copy = min(2048, dec_i.shape[1])
+        iq_i[:, :n_copy] = dec_i[:, :n_copy]
+        iq_q[:, :n_copy] = dec_q[:, :n_copy]
 
         fpga = SoftwareFPGA()
         frame = fpga.process_chirps(iq_i, iq_q, frame_number=42, timestamp=1.0)
@@ -653,22 +653,26 @@ class TestSoftwareFPGASignalChain(unittest.TestCase):
         self.assertIsInstance(frame, RadarFrame)
         self.assertEqual(frame.frame_number, 42)
         self.assertAlmostEqual(frame.timestamp, 1.0)
-        self.assertEqual(frame.range_doppler_i.shape, (64, 32))
-        self.assertEqual(frame.range_doppler_q.shape, (64, 32))
-        self.assertEqual(frame.magnitude.shape, (64, 32))
-        self.assertEqual(frame.detections.shape, (64, 32))
-        self.assertEqual(frame.range_profile.shape, (64,))
+        # Doppler width tracks input n_chirps (16-multiple → that-many sub-frames).
+        n_dop = (n_chirps // 16) * 16
+        self.assertEqual(frame.range_doppler_i.shape, (NUM_RANGE_BINS, n_dop))
+        self.assertEqual(frame.range_doppler_q.shape, (NUM_RANGE_BINS, n_dop))
+        self.assertEqual(frame.magnitude.shape, (NUM_RANGE_BINS, n_dop))
+        self.assertEqual(frame.detections.shape, (NUM_RANGE_BINS, n_dop))
+        self.assertEqual(frame.range_profile.shape, (NUM_RANGE_BINS,))
         self.assertEqual(frame.detection_count, int(frame.detections.sum()))
+        # Sanity: NUM_DOPPLER_BINS is the production max (48).
+        self.assertLessEqual(n_dop, NUM_DOPPLER_BINS)
 
     def test_cfar_enable_changes_detections(self):
         """Enabling CFAR vs simple threshold should yield different detection counts."""
-        if not self._cosim_available():
-            self.skipTest("co-sim data not found")
         from v7.software_fpga import SoftwareFPGA
+        from radar_protocol import NUM_RANGE_BINS, NUM_DOPPLER_BINS
 
-        iq_i = np.zeros((32, 1024), dtype=np.int64)
-        iq_q = np.zeros((32, 1024), dtype=np.int64)
-        # Inject a single strong tone in bin 10 of every chirp
+        # Production dimensions: 48 chirps × 2048 samples.
+        iq_i = np.zeros((NUM_DOPPLER_BINS, 2048), dtype=np.int64)
+        iq_q = np.zeros((NUM_DOPPLER_BINS, 2048), dtype=np.int64)
+        # Inject a single strong tone in bin 10 of every chirp.
         iq_i[:, 10] = 5000
         iq_q[:, 10] = 3000
 
@@ -678,14 +682,13 @@ class TestSoftwareFPGASignalChain(unittest.TestCase):
 
         fpga_cfar = SoftwareFPGA()
         fpga_cfar.set_cfar_enable(True)
-        fpga_cfar.set_cfar_alpha(0x10)  # low alpha → more detections
+        fpga_cfar.set_cfar_alpha(0x10)
         frame_cfar = fpga_cfar.process_chirps(iq_i, iq_q)
 
-        # Just verify both produce valid frames — exact counts depend on chain
         self.assertIsNotNone(frame_thresh)
         self.assertIsNotNone(frame_cfar)
-        self.assertEqual(frame_thresh.magnitude.shape, (64, 32))
-        self.assertEqual(frame_cfar.magnitude.shape, (64, 32))
+        self.assertEqual(frame_thresh.magnitude.shape, (NUM_RANGE_BINS, NUM_DOPPLER_BINS))
+        self.assertEqual(frame_cfar.magnitude.shape, (NUM_RANGE_BINS, NUM_DOPPLER_BINS))
 
 
 class TestQuantizeRawIQ(unittest.TestCase):
@@ -741,6 +744,9 @@ class TestDetectFormat(unittest.TestCase):
     def test_cosim_dir(self):
         if not os.path.isdir(self.COSIM_DIR):
             self.skipTest("co-sim dir not found")
+        # COSIM_DIR format requires doppler_map_i/q.npy; skip if absent.
+        if not os.path.isfile(os.path.join(self.COSIM_DIR, "doppler_map_i.npy")):
+            self.skipTest("co-sim doppler_map .npy files not present")
         from v7.replay import detect_format, ReplayFormat
         self.assertEqual(detect_format(self.COSIM_DIR), ReplayFormat.COSIM_DIR)
 
@@ -841,9 +847,11 @@ class TestReplayEngineRawIQ(unittest.TestCase):
         import tempfile
         from v7.replay import ReplayEngine
         from v7.software_fpga import SoftwareFPGA
-        from radar_protocol import RadarFrame
+        from radar_protocol import RadarFrame, NUM_RANGE_BINS, NUM_DOPPLER_BINS
 
-        raw = np.random.randn(2, 32, 1024) + 1j * np.random.randn(2, 32, 1024)
+        # Production dimensions: 48 chirps × 2048 samples per frame.
+        raw = (np.random.randn(2, NUM_DOPPLER_BINS, 2048)
+               + 1j * np.random.randn(2, NUM_DOPPLER_BINS, 2048))
         with tempfile.NamedTemporaryFile(suffix=".npy", delete=False) as f:
             np.save(f, raw)
             tmp = f.name
@@ -852,7 +860,7 @@ class TestReplayEngineRawIQ(unittest.TestCase):
             engine = ReplayEngine(tmp, software_fpga=fpga)
             frame = engine.get_frame(0)
             self.assertIsInstance(frame, RadarFrame)
-            self.assertEqual(frame.range_doppler_i.shape, (64, 32))
+            self.assertEqual(frame.range_doppler_i.shape, (NUM_RANGE_BINS, NUM_DOPPLER_BINS))
             self.assertEqual(frame.frame_number, 0)
         finally:
             os.unlink(tmp)

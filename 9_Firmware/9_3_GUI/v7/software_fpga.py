@@ -1,13 +1,21 @@
 """
 v7.software_fpga — Bit-accurate software replica of the AERIS-10 FPGA signal chain.
 
-Imports processing functions directly from golden_reference.py (Option A)
-to avoid code duplication.  Every stage is toggleable via the same host
-register interface the real FPGA exposes, so the dashboard spinboxes can
-drive either backend transparently.
+Imports processing functions directly from fpga_model.py to avoid code
+duplication.  Every stage is toggleable via the same host register
+interface the real FPGA exposes, so the dashboard spinboxes can drive
+either backend transparently during replay-from-raw-IQ.
 
-Signal chain order (matching RTL):
+Signal chain order (matching RTL, post-PR-O.6 / PR-F dimensions —
+2048-pt range FFT, 4x decimation -> 512 range bins, 48 chirps in
+3 sub-frames -> 48 Doppler bins):
+
     quantize → range_fft → decimator → MTI → doppler_fft → dc_notch → CFAR → RadarFrame
+
+History: golden_reference.py was deleted in commit e8b495c (the "dead golden
+code cleanup").  fpga_model.py is the surviving bit-accurate model and
+holds the chain helpers via the run_* shims appended in the post-cleanup
+revival.
 
 Usage:
     fpga = SoftwareFPGA()
@@ -25,16 +33,17 @@ from pathlib import Path
 import numpy as np
 
 # ---------------------------------------------------------------------------
-# Import golden_reference by adding the cosim path to sys.path
+# Import chain helpers from fpga_model.py (cosim/) — was golden_reference.py
+# under cosim/real_data/ before commit e8b495c.
 # ---------------------------------------------------------------------------
-_GOLDEN_REF_DIR = str(
+_FPGA_COSIM_DIR = str(
     Path(__file__).resolve().parents[2]  # 9_Firmware/
-    / "9_2_FPGA" / "tb" / "cosim" / "real_data"
+    / "9_2_FPGA" / "tb" / "cosim"
 )
-if _GOLDEN_REF_DIR not in sys.path:
-    sys.path.insert(0, _GOLDEN_REF_DIR)
+if _FPGA_COSIM_DIR not in sys.path:
+    sys.path.insert(0, _FPGA_COSIM_DIR)
 
-from golden_reference import (  # noqa: E402
+from fpga_model import (  # noqa: E402
     run_range_fft,
     run_range_bin_decimator,
     run_mti_canceller,
@@ -53,10 +62,12 @@ from radar_protocol import RadarFrame  # noqa: E402
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Twiddle factor file paths (relative to FPGA root)
+# Twiddle factor file paths (relative to FPGA root).  Production range FFT
+# is 2048-pt (PR-O.6); fpga_model.load_twiddle_rom auto-falls back to
+# math-generated twiddles when a path is None.
 # ---------------------------------------------------------------------------
 _FPGA_DIR = Path(__file__).resolve().parents[2] / "9_2_FPGA"
-TWIDDLE_1024 = str(_FPGA_DIR / "fft_twiddle_1024.mem")
+TWIDDLE_2048 = str(_FPGA_DIR / "fft_twiddle_2048.mem")
 TWIDDLE_16 = str(_FPGA_DIR / "fft_twiddle_16.mem")
 
 # CFAR mode int→string mapping (FPGA register 0x24: 0=CA, 1=GO, 2=SO)
@@ -176,18 +187,20 @@ class SoftwareFPGA:
         n_chirps = iq_i.shape[0]
         n_samples = iq_i.shape[1]
 
-        # --- Stage 1: Range FFT (per chirp) ---
+        # --- Stage 1: Range FFT (per chirp). N is inferred from input length;
+        #     pass a twiddle file only when it matches the input N (defaults
+        #     to math-generated twiddles otherwise).
         range_i = np.zeros((n_chirps, n_samples), dtype=np.int64)
         range_q = np.zeros((n_chirps, n_samples), dtype=np.int64)
-        twiddle_1024 = TWIDDLE_1024 if os.path.exists(TWIDDLE_1024) else None
+        twiddle_path = TWIDDLE_2048 if (n_samples == 2048 and os.path.exists(TWIDDLE_2048)) else None
         for c in range(n_chirps):
             range_i[c], range_q[c] = run_range_fft(
                 iq_i[c].astype(np.int64),
                 iq_q[c].astype(np.int64),
-                twiddle_file=twiddle_1024,
+                twiddle_file=twiddle_path,
             )
 
-        # --- Stage 2: Range bin decimation (1024 → 64) ---
+        # --- Stage 2: Range bin decimation (production 2048 -> 512) ---
         decim_i, decim_q = run_range_bin_decimator(range_i, range_q)
 
         # --- Stage 3: MTI canceller (pre-Doppler, per-chirp) ---

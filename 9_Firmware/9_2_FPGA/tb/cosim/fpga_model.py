@@ -1384,6 +1384,218 @@ class SignalChain:
 
 
 # =============================================================================
+# Frame-level chain helpers — restored post-e8b495c golden_reference deletion.
+#
+# These wrap the bit-accurate stage classes above (FFTEngine, RangeBinDecimator,
+# DopplerProcessor) and add the missing stages (MTI, DC notch, CFAR, threshold
+# detection) ported from golden_reference.py @ commit 237e74c~1.  Used by
+# v7.software_fpga (replay-from-raw-IQ in the GUIs).
+#
+# Dimensions track current production (PR-O.6 / PR-F):
+#   FFT_SIZE = 2048   (range FFT N)
+#   NUM_RANGE_BINS = 512 (after RangeBinDecimator 4x)
+#   DOPPLER_CHIRPS = 48 (3 sub-frames x 16 chirps)
+#   DOPPLER_TOTAL_BINS = 48 (3 sub-frames x 16-pt FFT)
+# =============================================================================
+
+import numpy as np  # noqa: E402
+
+FFT_SIZE = 2048
+NUM_RANGE_BINS = RangeBinDecimator.OUTPUT_BINS              # 512
+DOPPLER_CHIRPS = DopplerProcessor.CHIRPS_PER_FRAME           # 48
+DOPPLER_TOTAL_BINS = (DopplerProcessor.NUM_SUBFRAMES
+                      * DopplerProcessor.DOPPLER_FFT_SIZE)   # 48
+
+
+def run_range_fft(iq_i, iq_q, twiddle_file=None):
+    """Per-chirp range FFT (wrapper around FFTEngine).
+
+    N is inferred from input length so legacy 1024-pt callers and
+    production 2048-pt callers both work.
+    """
+    n = len(iq_i)
+    fft = FFTEngine(n=n, twiddle_file=twiddle_file)
+    out_re, out_im = fft.compute(list(iq_i), list(iq_q))
+    return np.array(out_re, dtype=np.int64), np.array(out_im, dtype=np.int64)
+
+
+def run_range_bin_decimator(range_i, range_q, mode=1):
+    """Per-frame range decimator (FFT_SIZE -> NUM_RANGE_BINS).
+
+    mode: 0=center, 1=peak, 2=average, 3=zero (matches RTL register 0x0E).
+    Output length is always RangeBinDecimator.OUTPUT_BINS (512 in production);
+    short inputs are zero-filled past the available source bins.
+    """
+    n_chirps = range_i.shape[0]
+    decim_i = np.zeros((n_chirps, NUM_RANGE_BINS), dtype=np.int64)
+    decim_q = np.zeros((n_chirps, NUM_RANGE_BINS), dtype=np.int64)
+    for c in range(n_chirps):
+        out_re, out_im = RangeBinDecimator.decimate(
+            list(range_i[c]), list(range_q[c]), mode=mode,
+        )
+        decim_i[c, :] = out_re
+        decim_q[c, :] = out_im
+    return decim_i, decim_q
+
+
+def run_mti_canceller(decim_i, decim_q, enable=True):
+    """2-pulse MTI canceller (bit-accurate model of mti_canceller.v).
+
+    First chirp output is muted (no previous data); subsequent chirps:
+    out[c] = decim[c] - decim[c-1], saturated to 16-bit.
+    """
+    if not enable:
+        return decim_i.copy(), decim_q.copy()
+    n_chirps, n_bins = decim_i.shape
+    mti_i = np.zeros_like(decim_i)
+    mti_q = np.zeros_like(decim_q)
+    for c in range(1, n_chirps):
+        for r in range(n_bins):
+            diff_i = int(decim_i[c, r]) - int(decim_i[c - 1, r])
+            diff_q = int(decim_q[c, r]) - int(decim_q[c - 1, r])
+            mti_i[c, r] = saturate(diff_i, 16)
+            mti_q[c, r] = saturate(diff_q, 16)
+    return mti_i, mti_q
+
+
+def run_doppler_fft(mti_i, mti_q, twiddle_file_16=None):
+    """Multi-sub-frame Doppler FFT (wrapper around DopplerProcessor.process_frame).
+
+    Sub-frame count and range-bin count are inferred from input shape so
+    legacy 2-sub-frame (32-chirp) and production 3-sub-frame (48-chirp)
+    callers both work.
+
+    Input  : (n_chirps, n_rbins), 16-bit signed.
+    Output : (n_rbins, n_subframes * 16), 16-bit signed.
+    """
+    n_chirps, n_rbins = mti_i.shape
+    chirps_per_sf = DopplerProcessor.CHIRPS_PER_SUBFRAME  # 16
+    n_subframes = max(1, n_chirps // chirps_per_sf)
+    dp = DopplerProcessor(
+        twiddle_file_16=twiddle_file_16,
+        num_subframes=n_subframes,
+    )
+    dp.RANGE_BINS = n_rbins  # override hardcoded production value
+    chirp_data_i = [list(mti_i[c]) for c in range(n_chirps)]
+    chirp_data_q = [list(mti_q[c]) for c in range(n_chirps)]
+    map_i, map_q = dp.process_frame(chirp_data_i, chirp_data_q)
+    return np.array(map_i, dtype=np.int64), np.array(map_q, dtype=np.int64)
+
+
+def run_dc_notch(doppler_i, doppler_q, width=2):
+    """Per-bin DC notch (bit-accurate model of radar_system_top.v inline filter).
+
+    bin_within_sf = dbin & 0xF;  zero when
+      width != 0 and (bin_within_sf < width or bin_within_sf > 15-width+1).
+    Generalises to any number of sub-frames.
+    """
+    notched_i = doppler_i.copy()
+    notched_q = doppler_q.copy()
+    if width == 0:
+        return notched_i, notched_q
+    n_doppler = doppler_i.shape[1]
+    for dbin in range(n_doppler):
+        bin_within_sf = dbin & 0xF
+        if bin_within_sf < width or bin_within_sf > (15 - width + 1):
+            notched_i[:, dbin] = 0
+            notched_q[:, dbin] = 0
+    return notched_i, notched_q
+
+
+def run_cfar_ca(doppler_i, doppler_q, guard=2, train=8,
+                alpha_q44=0x30, mode='CA'):
+    """CFAR detection — bit-accurate model of cfar_ca.v (CA / GO / SO modes).
+
+    Per Doppler column: |I|+|Q| L1 magnitude, then for each cell take
+    leading + lagging training cells (skipping ``guard`` cells),
+    threshold = (alpha_q44 * noise_sum) >> 4 saturated to 17 bits,
+    detect if magnitude > threshold.
+
+    Returns (detect_flags, magnitudes, thresholds) — each shape
+    (n_range, n_doppler).
+    """
+    n_range, n_doppler = doppler_i.shape
+    ALPHA_FRAC_BITS = 4
+    if train == 0:
+        train = 1
+
+    magnitudes = np.zeros((n_range, n_doppler), dtype=np.int64)
+    for rbin in range(n_range):
+        for dbin in range(n_doppler):
+            i_val = int(doppler_i[rbin, dbin])
+            q_val = int(doppler_q[rbin, dbin])
+            abs_i = (-i_val) & 0xFFFF if i_val < 0 else i_val & 0xFFFF
+            abs_q = (-q_val) & 0xFFFF if q_val < 0 else q_val & 0xFFFF
+            magnitudes[rbin, dbin] = abs_i + abs_q
+
+    detect_flags = np.zeros((n_range, n_doppler), dtype=np.bool_)
+    thresholds = np.zeros((n_range, n_doppler), dtype=np.int64)
+    MAX_MAG = (1 << 17) - 1
+
+    for dbin in range(n_doppler):
+        col = magnitudes[:, dbin]
+        for cut_idx in range(n_range):
+            leading_sum = 0
+            leading_count = 0
+            for t in range(1, train + 1):
+                idx = cut_idx - guard - t
+                if 0 <= idx < n_range:
+                    leading_sum += int(col[idx])
+                    leading_count += 1
+            lagging_sum = 0
+            lagging_count = 0
+            for t in range(1, train + 1):
+                idx = cut_idx + guard + t
+                if 0 <= idx < n_range:
+                    lagging_sum += int(col[idx])
+                    lagging_count += 1
+
+            if mode in ('CA', 'CA-CFAR'):
+                noise_sum = leading_sum + lagging_sum
+            elif mode in ('GO', 'GO-CFAR'):
+                if leading_count > 0 and lagging_count > 0:
+                    if leading_sum * lagging_count > lagging_sum * leading_count:
+                        noise_sum = leading_sum
+                    else:
+                        noise_sum = lagging_sum
+                elif leading_count > 0:
+                    noise_sum = leading_sum
+                else:
+                    noise_sum = lagging_sum
+            elif mode in ('SO', 'SO-CFAR'):
+                if leading_count > 0 and lagging_count > 0:
+                    if leading_sum * lagging_count < lagging_sum * leading_count:
+                        noise_sum = leading_sum
+                    else:
+                        noise_sum = lagging_sum
+                elif leading_count > 0:
+                    noise_sum = leading_sum
+                else:
+                    noise_sum = lagging_sum
+            else:
+                noise_sum = leading_sum + lagging_sum
+
+            threshold_raw = (alpha_q44 * noise_sum) >> ALPHA_FRAC_BITS
+            threshold_val = MAX_MAG if threshold_raw > MAX_MAG else int(threshold_raw)
+            thresholds[cut_idx, dbin] = threshold_val
+            if int(col[cut_idx]) > threshold_val:
+                detect_flags[cut_idx, dbin] = True
+
+    return detect_flags, magnitudes, thresholds
+
+
+def run_detection(doppler_i, doppler_q, threshold=10000):
+    """Threshold detection — |I|+|Q| > threshold.
+
+    Returns (mag, det_indices) where det_indices is an (M, 2) array of
+    [rbin, dbin] cells exceeding the threshold.
+    """
+    mag = np.abs(doppler_i.astype(np.int64)) + np.abs(doppler_q.astype(np.int64))
+    det_indices = np.argwhere(mag > threshold)
+    return mag, det_indices
+
+
+# =============================================================================
 # Self-test / Validation
 # =============================================================================
 
