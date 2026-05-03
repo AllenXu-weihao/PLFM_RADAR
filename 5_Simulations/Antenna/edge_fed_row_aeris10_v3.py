@@ -17,16 +17,24 @@
 # top-below-stopband mode (deepest dip just below the gap center).
 #
 # Verified design point (PROFILE=balanced, λ/25 mesh):
-#   W=7.854 mm  L=6.95 mm  CONN_LEN=8.0 mm  pitch=14.95 mm
+#   W=7.854 mm  L=6.95 mm  CONN_LEN=8.15 mm  pitch=15.10 mm
 #   INSET_DEPTH=0 (direct edge feed; inset on patch 0 drops Z to ~6 Ω which
 #   is unmatchable for N=8 — natural edge-fed Z at array resonance is ~80 Ω,
 #   close to 50 Ω so no input matching network is needed)
 #   FEED_W=1.16 mm  FEED_LEAD=15.5 mm
 #
-# Verified result:
-#   Top-below-gap mode at 10.56 GHz: S11 = -22.5 dB, Zin = 79.9 - j3.3 Ω
-#   -10 dB BW: 100 MHz (10.510 - 10.610 GHz)
-#   Covers radar TX 10.510-10.530 GHz with S11 = -10.9 to -14.6 dB
+# Verified result (operating-mode CONN_LEN swept to land dip on TX center):
+#   Operating mode at 10.520 GHz: S11 = -18.8 dB, Zin = 76.2 - j9.3 Ω
+#   -10 dB BW: 100 MHz (10.470 - 10.570 GHz)
+#   Across radar TX 10.510-10.530 GHz: S11 = -17.4 to -18.8 dB (symmetric)
+#   At 10.500 GHz (LO): S11 = -15.4 dB
+#
+# Sensitivity: df/dCONN_LEN ≈ -0.20 GHz/mm (longer CONN → lower op freq).
+# To recenter on a different freq:
+#   CONN=8.25 → dip at 10.500 GHz   (LO-centered, TX edge falls off)
+#   CONN=8.15 → dip at 10.520 GHz   (TX-centered, recommended)
+#   CONN=8.20 → dip at 10.510 GHz   (TX-low-edge centered)
+#   CONN=8.00 → dip at 10.560 GHz   (above TX band)
 #
 # CRITICAL difference from edge_fed_aeris10_v3.py: single-element used inset
 # (INSET_DEPTH=3.40) to match each patch to 50 Ω; row uses NO inset because
@@ -105,11 +113,10 @@ INSET_DEPTH  = float(os.environ.get("INSET_DEPTH_MM", "0.0"))
 INSET_GAP    = float(os.environ.get("INSET_GAP_MM", "0.30"))
 FEED_LEAD_L  = float(os.environ.get("FEED_LEAD_MM", "15.5"))
 
-# Connecting line. With CONN_LEN=8.0 the array's stopband is centered on the
-# patch resonance (~10.5 GHz for L=6.95) and the deepest below-gap mode lands
-# at 10.56 GHz, with -10 dB BW spanning 10.51-10.61 GHz (covers radar TX
-# 10.510-10.530). Pitch = PATCH_L + CONN_LEN = 14.95 mm matches old Gerber.
-CONN_LEN     = float(os.environ.get("CONN_LEN_MM", "8.0"))
+# Connecting line. CONN_LEN=8.15 lands the operating-mode dip at 10.520 GHz
+# (radar TX center), giving symmetric -17 to -19 dB across the 10.510-10.530
+# chirp band. Pitch = PATCH_L + CONN_LEN = 15.10 mm (vs old Gerber 15.01).
+CONN_LEN     = float(os.environ.get("CONN_LEN_MM", "8.15"))
 
 PITCH = PATCH_L + CONN_LEN
 
