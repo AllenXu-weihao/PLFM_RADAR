@@ -3,17 +3,18 @@
 // ============================================================================
 // tb_ad9484_xsim.v — XSim testbench for ad9484_interface_400m.v
 //
-// Tests the REAL module with Xilinx UNISIM primitives (IBUFDS, BUFG, IDDR).
-// Must be compiled with xvlog/xelab/xsim (not iverilog).
+// Tests the REAL module with Xilinx UNISIM primitives (IBUFDS, BUFIO,
+// BUFG, MMCME2_ADV). Must be compiled with xvlog/xelab/xsim (not iverilog).
 //
 // Key things tested:
 //   1. Differential LVDS data capture (IBUFDS)
-//   2. IDDR Q2 (falling-edge) data capture in SAME_EDGE_PIPELINED mode
+//   2. Falling-DCO-edge IOB-packed IFF capture (post-AUDIT-C4 SDR shape;
+//      no IDDR, no rise/fall demux)
 //   3. Reset synchronizer (P1-7 fix: async assert, sync de-assert)
 //   4. Data integrity through full pipeline
-//   5. AUDIT-C4: SDR-correctness — every rising-DCO sample appears exactly
-//      once in the output stream (no duplications, no drops). Catches any
-//      future regression that reintroduces a DDR-style Q1/Q2 demux on this
+//   5. AUDIT-C4: SDR-correctness — every DCO period produces exactly one
+//      output sample (no duplications, no drops). Catches any future
+//      regression that reintroduces a DDR-style Q1/Q2 demux on this
 //      SDR-only chip.
 // ============================================================================
 
@@ -112,7 +113,7 @@ module tb_ad9484_xsim;
     // ── Stimulus ───────────────────────────────────────────────
     initial begin
         $display("\n=== AD9484 Interface XSim Testbench ===");
-        $display("  Testing REAL Xilinx primitives (IBUFDS, BUFG, IDDR)");
+        $display("  Testing REAL Xilinx primitives (IBUFDS, BUFIO, BUFG, MMCME2)");
         $display("  Testing reset synchronizer (P1-7 fix)\n");
 
         // Init
@@ -180,60 +181,15 @@ module tb_ad9484_xsim;
         end
 
         // ════════════════════════════════════════════════════════
-        // TEST GROUP 4: Data capture via IDDR
+        // TEST GROUP 4 — RETIRED (F-7.3, PR-X.2)
         // ════════════════════════════════════════════════════════
-        $display("\n--- Test Group 4: IDDR Data Capture ---");
-
-        // Reset and restart
-        reset_n = 0;
-        adc_d_p = 8'h00;
-        #100;
-        reset_n = 1;
-        // F-7.4: every reset cycle re-arms the MMCM lock countdown, so
-        // wait for lock + sync drain before driving the test pattern.
-        wait_for_adc_ready();
-
-        // Feed a known pattern on rising edges
-        // IDDR in SAME_EDGE_PIPELINED mode captures:
-        //   Q1 = data at rising edge (1 cycle pipelined)
-        //   Q2 = data at falling edge (pipelined to align with Q1)
-        // The module alternates output between Q1 and Q2 via dco_phase
-
-        // Drive known data: alternate 0xAA on rise, 0x55 on fall
-        begin : iddr_test
-            reg [7:0] captured [0:31];
-            integer cap_count;
-            integer saw_aa, saw_55;
-
-            cap_count = 0;
-            saw_aa = 0;
-            saw_55 = 0;
-
-            for (i = 0; i < 20; i = i + 1) begin
-                // Set data before rising edge
-                adc_d_p = 8'hAA;
-                @(posedge adc_dco_p);
-                // Set data before falling edge
-                #0.1;
-                adc_d_p = 8'h55;
-                @(negedge adc_dco_p);
-                #0.1;
-
-                // Capture output
-                if (adc_data_valid_400m && cap_count < 32) begin
-                    captured[cap_count] = adc_data_400m;
-                    if (adc_data_400m == 8'hAA) saw_aa = saw_aa + 1;
-                    if (adc_data_400m == 8'h55) saw_55 = saw_55+ 1;
-                    cap_count = cap_count + 1;
-                end
-            end
-
-            $display("  Captured %0d samples, saw 0xAA: %0d times, 0x55: %0d times",
-                     cap_count, saw_aa, saw_55);
-            check(cap_count > 0, "IDDR produces output samples");
-            // With DDR capture, we should see both rise and fall data
-            check(saw_aa > 0 || saw_55 > 0, "IDDR captures at least one known value");
-        end
+        // Was a "data capture via IDDR" test that drove 0xAA on rising
+        // DCO and 0x55 on falling DCO. After AUDIT-C4 the IFF only
+        // captures the falling edge (SDR), so all outputs were 0x55 —
+        // and the assertion `saw_aa > 0 || saw_55 > 0` was trivially
+        // true. Group 5 (sequential integrity) and Group 8 (SDR ramp,
+        // AUDIT-C4) are strictly stronger and remain the load-bearing
+        // checks. Group numbering preserved for git-blame continuity.
 
         // ════════════════════════════════════════════════════════
         // TEST GROUP 5: Sequential data integrity
@@ -314,8 +270,8 @@ module tb_ad9484_xsim;
         // held stable across the full DCO period. We model that by
         // launching a new counter value just after each rising DCO
         // edge (~tPD = 0.85 ns) and holding it stable. The interface
-        // captures Q2 of the IDDR (falling-edge, in the stable window)
-        // and re-registers into BUFG → output.
+        // captures the IOB-packed IFF on the falling DCO edge (mid
+        // stable window) and re-registers into BUFG → output.
         //
         // Correctness invariant: once the pipeline fills, the output
         // stream must increment by exactly 1 per BUFG cycle — no
