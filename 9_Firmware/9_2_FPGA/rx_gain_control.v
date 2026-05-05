@@ -87,9 +87,14 @@ reg [14:0] frame_peak;         // Peak |sample| this frame (15-bit unsigned)
 reg agc_enable_prev;
 
 // Combinational helpers for inclusive frame-boundary snapshot
-// (used when valid_in and frame_boundary coincide)
-reg wire_frame_sat_incr;
-reg wire_frame_peak_update;
+// (used when valid_in and frame_boundary coincide). Audit S-7: previously
+// declared `reg` and blocking-assigned inside the clocked always — risked
+// sim/synth divergence and triggered iverilog warnings. They are pure
+// combinational functions of the registered inputs they consume, so live
+// at module scope as wires (the read of frame_sat_count / frame_peak still
+// reflects the prior-cycle latched value, identical to the old behaviour).
+wire wire_frame_sat_incr;
+wire wire_frame_peak_update;
 
 // =========================================================================
 // EFFECTIVE GAIN SELECTION
@@ -138,6 +143,11 @@ wire signed [15:0] sat_q = overflow_q ? (shifted_q[23] ? -16'sd32768 : 16'sd3276
 wire [14:0] abs_i = data_i_in[15] ? (~data_i_in[14:0] + 15'd1) : data_i_in[14:0];
 wire [14:0] abs_q = data_q_in[15] ? (~data_q_in[14:0] + 15'd1) : data_q_in[14:0];
 wire [14:0] max_iq = (abs_i > abs_q) ? abs_i : abs_q;
+
+// S-7 continuous assigns for the boundary-snapshot helpers (declared above).
+assign wire_frame_sat_incr    = (valid_in && (overflow_i || overflow_q)
+                                 && (frame_sat_count != 8'hFF));
+assign wire_frame_peak_update = (valid_in && (max_iq > frame_peak));
 
 // =========================================================================
 // SIGNED GAIN ↔ GAIN_SHIFT ENCODING CONVERSION
@@ -203,14 +213,11 @@ always @(posedge clk or negedge reset_n) begin
         // Track AGC enable transitions
         agc_enable_prev <= agc_enable;
 
-        // Compute inclusive metrics: if valid_in fires this cycle,
-        // include current sample in the snapshot taken at frame_boundary.
-        // This avoids losing the last sample when valid_in and
+        // S-7: wire_frame_sat_incr / wire_frame_peak_update are now
+        // module-scope continuous assigns — see top of file. The boundary
+        // snapshot below still consumes them inclusively when valid_in and
         // frame_boundary coincide (NBA last-write-wins would otherwise
         // snapshot stale values then reset, dropping the sample entirely).
-        wire_frame_sat_incr = (valid_in && (overflow_i || overflow_q)
-                               && (frame_sat_count != 8'hFF));
-        wire_frame_peak_update = (valid_in && (max_iq > frame_peak));
 
         // ---- Data pipeline (1-cycle latency) ----
         valid_out <= valid_in;

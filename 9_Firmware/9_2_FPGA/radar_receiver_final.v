@@ -334,7 +334,15 @@ ad9484_interface_400m adc (
 // Compare with ddc_400m.v `cdc_cic_fir_overrun_sticky` which already
 // uses reset_monitors as a clear, and the new symmetric path here keeps
 // the AD9484 overrange diagnostic consistent.
-wire clear_monitors_pulse = 1'b0;   // future host-driven clear hook
+//
+// Audit M-11: `force_saturation_pulse` is the symmetric hook for the DDC's
+// debug `force_saturation` input (forces the saturation flag high for
+// validation campaigns). Today it is tied 1'b0 — the DDC saturation path
+// is exercised only by real overflow conditions. When a future host opcode
+// surface for "diagnostic force/clear" lands, both this pulse and
+// clear_monitors_pulse below get driven from the same dispatcher.
+wire force_saturation_pulse = 1'b0;  // future host-driven force hook
+wire clear_monitors_pulse   = 1'b0;  // future host-driven clear hook
 reg  adc_overrange_sticky_400m;
 always @(posedge clk_400m or negedge reset_n) begin
     if (!reset_n)
@@ -403,7 +411,9 @@ ddc_400m_enhanced ddc(
     // Test/debug inputs — explicit tie-low (were floating)
     .test_mode(2'b00),
     .test_phase_inc(16'h0000),
-    .force_saturation(1'b0),
+    // M-11: routed through `force_saturation_pulse` so a future host
+    // opcode can exercise the DDC saturation path alongside the clear hook.
+    .force_saturation(force_saturation_pulse),
     // F-7.7: routed through the shared clear_monitors_pulse wire so the
     // DDC's internal stickies and the AD9484 OR sticky above clear from
     // the same future host opcode.
@@ -419,6 +429,12 @@ ddc_400m_enhanced ddc(
 assign ddc_overflow_any     = ddc_mixer_saturation | ddc_filter_overflow | adc_overrange_100m;
 assign ddc_saturation_count = ddc_diagnostics_w[7:5];
 
+// Audit M-10: in production AD9484 produces a single 8-bit stream that the
+// DDC mixes into matched I/Q paths with symmetric pipelines, so ddc_valid_i
+// and ddc_valid_q rise on the same cycle and `data_sync_error` cannot fire
+// by construction. The check is retained inside ddc_input_interface for the
+// standalone tb_ddc_input_interface unit-test (which intentionally drives
+// valid_i ≠ valid_q) — left unconnected here.
 ddc_input_interface ddc_if (
     .clk(clk),
     .reset_n(reset_n),
@@ -429,7 +445,7 @@ ddc_input_interface ddc_if (
     .adc_i(adc_i_scaled),
     .adc_q(adc_q_scaled),
     .adc_valid(adc_valid_sync),
-    .data_sync_error()
+    .data_sync_error()  // unconnected — see M-10 note above
 );
 
 // 2b. Digital Gain Control with AGC

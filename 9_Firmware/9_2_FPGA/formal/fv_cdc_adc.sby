@@ -12,11 +12,11 @@ cover: depth 200
 smtbmc z3
 
 [script]
-read_verilog -formal cdc_modules.v
+read_verilog -formal cdc_async_fifo.v
 read_verilog -formal fv_cdc_adc.v
 prep -top fv_cdc_adc
 clk2fflogic
 
 [files]
-../cdc_modules.v
+../cdc_async_fifo.v
 fv_cdc_adc.v

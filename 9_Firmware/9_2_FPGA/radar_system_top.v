@@ -688,9 +688,16 @@ assign rx_doppler_data_valid = rx_doppler_valid;
 wire dc_notch_active;
 wire [`RP_DOPPLER_BIN_WIDTH-1:0] dop_bin_unsigned = rx_doppler_bin;
 wire [3:0] bin_within_sf = dop_bin_unsigned[3:0];
+// Audit S-1: ±W around DC in a 16-bin FFT covers bins {0..W, 16-W..15}
+// (2W+1 total, bin 8 the only one excluded at W=7). The previous form
+// `< W || > 15-W+1` missed both boundaries: at W=1 it notched only {0}
+// (skipping 1 and 15); at W=7 it missed 7 and 9. Inclusive comparators
+// against the 5-bit limits hit the intended set for all W ∈ {1..7}.
+wire [4:0] notch_lo = {2'b00, host_dc_notch_width};                // 0..7
+wire [4:0] notch_hi = 5'd16 - notch_lo;                            // 9..16
 assign dc_notch_active = (host_dc_notch_width != 3'd0) &&
-                          (bin_within_sf < {1'b0, host_dc_notch_width} ||
-                           bin_within_sf > (4'd15 - {1'b0, host_dc_notch_width} + 4'd1));
+                          ({1'b0, bin_within_sf} <= notch_lo ||
+                           {1'b0, bin_within_sf} >= notch_hi);
 
 // Notched Doppler data: zero I/Q when in notch zone, pass through otherwise
 wire [31:0] notched_doppler_data  = dc_notch_active ? 32'd0 : rx_doppler_output;
