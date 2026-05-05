@@ -96,107 +96,6 @@ ADAR1000Manager::~ADAR1000Manager() {
     // Automatic cleanup by unique_ptr
 }
 
-// System Management
-bool ADAR1000Manager::powerUpSystem() {
-    DIAG_SECTION("BF POWER-UP SEQUENCE");
-    uint32_t t0 = HAL_GetTick();
-    const uint8_t msg[] = "Starting System Power-Up Sequence...\r\n";
-    HAL_UART_Transmit(&huart3, msg, sizeof(msg) - 1, 1000);
-
-    // Power-up sequence steps...
-    DIAG("BF", "Enabling VDD_SW (3.3V)");
-    HAL_GPIO_WritePin(EN_P_3V3_VDD_SW_GPIO_Port, EN_P_3V3_VDD_SW_Pin, GPIO_PIN_SET);
-    HAL_Delay(2);
-
-    DIAG("BF", "Enabling VSS_SW (3.3V)");
-    HAL_GPIO_WritePin(EN_P_3V3_SW_GPIO_Port, EN_P_3V3_SW_Pin, GPIO_PIN_SET);
-    HAL_Delay(2);
-
-    // Initialize devices
-    DIAG("BF", "Calling initializeAllDevices()");
-    if (!initializeAllDevices()) {
-        DIAG_ERR("BF", "initializeAllDevices() FAILED");
-        const uint8_t err[] = "ERROR: ADAR1000 initialization failed!\r\n";
-        HAL_UART_Transmit(&huart3, err, sizeof(err) - 1, 1000);
-        return false;
-    }
-    DIAG("BF", "initializeAllDevices() OK");
-
-    // Start in RX mode
-    DIAG("BF", "Setting initial mode to RX");
-    switchToRXMode();
-
-    DIAG_ELAPSED("BF", "powerUpSystem() total", t0);
-    const uint8_t success[] = "System Power-Up Sequence Completed Successfully.\r\n";
-    HAL_UART_Transmit(&huart3, success, sizeof(success) - 1, 1000);
-    return true;
-}
-
-bool ADAR1000Manager::powerDownSystem() {
-    DIAG_SECTION("BF POWER-DOWN SEQUENCE");
-    DIAG("BF", "Switching to RX mode before power-down");
-    switchToRXMode();
-    HAL_Delay(10);
-
-    DIAG("BF", "Disabling PA supplies");
-    disablePASupplies();
-    DIAG("BF", "Disabling LNA supplies");
-    disableLNASupplies();
-    DIAG("BF", "Disabling VSS_SW rail");
-    HAL_GPIO_WritePin(EN_P_3V3_SW_GPIO_Port, EN_P_3V3_SW_Pin, GPIO_PIN_RESET);
-    DIAG("BF", "Disabling VDD_SW rail");
-    HAL_GPIO_WritePin(EN_P_3V3_VDD_SW_GPIO_Port, EN_P_3V3_VDD_SW_Pin, GPIO_PIN_RESET);
-
-    DIAG("BF", "powerDownSystem() complete");
-    return true;
-}
-
-// Mode Switching
-void ADAR1000Manager::switchToTXMode() {
-    DIAG_SECTION("BF SWITCH TO TX MODE");
-    DIAG("BF", "Step 1: LNA bias OFF");
-    setLNABias(false);
-    delayUs(10);
-    DIAG("BF", "Step 2: Enable PA supplies");
-    enablePASupplies();
-    delayUs(100);
-    DIAG("BF", "Step 3: PA bias ON");
-    setPABias(true);
-    delayUs(50);
-    /* TR pin is FPGA-owned (adar_tr_x); chirp FSM asserts TX path. We write
-     * per-channel TX enables so the FPGA TR override has something to gate. */
-    for (uint8_t dev = 0; dev < devices_.size(); ++dev) {
-        adarWrite(dev, REG_RX_ENABLES, 0x00, BROADCAST_OFF);
-        adarWrite(dev, REG_TX_ENABLES, 0x0F, BROADCAST_OFF);
-        adarSetTxBias(dev, BROADCAST_OFF);
-        DIAG("BF", "  dev[%u] TX enables=0x0F, TX bias set", dev);
-    }
-    DIAG("BF", "switchToTXMode() complete");
-}
-
-void ADAR1000Manager::switchToRXMode() {
-    DIAG_SECTION("BF SWITCH TO RX MODE");
-    DIAG("BF", "Step 1: PA bias OFF");
-    setPABias(false);
-    delayUs(50);
-    DIAG("BF", "Step 2: Disable PA supplies");
-    disablePASupplies();
-    delayUs(10);
-    DIAG("BF", "Step 3: Enable LNA supplies");
-    enableLNASupplies();
-    delayUs(50);
-    DIAG("BF", "Step 4: LNA bias ON");
-    setLNABias(true);
-    delayUs(50);
-
-    for (uint8_t dev = 0; dev < devices_.size(); ++dev) {
-        adarWrite(dev, REG_TX_ENABLES, 0x00, BROADCAST_OFF);
-        adarWrite(dev, REG_RX_ENABLES, 0x0F, BROADCAST_OFF);
-        DIAG("BF", "  dev[%u] RX enables=0x0F", dev);
-    }
-    DIAG("BF", "switchToRXMode() complete");
-}
-
 // Monitoring and Diagnostics
 float ADAR1000Manager::readTemperature(uint8_t deviceIndex) {
     if (deviceIndex >= devices_.size() || !devices_[deviceIndex]->initialized) {
@@ -560,27 +459,6 @@ void ADAR1000Manager::enableLNASupplies() {
 void ADAR1000Manager::disableLNASupplies() {
     DIAG("BF", "disableLNASupplies(): ADTR 3.3V -> OFF");
     HAL_GPIO_WritePin(EN_P_3V3_ADTR_GPIO_Port, EN_P_3V3_ADTR_Pin, GPIO_PIN_RESET);
-}
-
-void ADAR1000Manager::setPABias(bool enable) {
-    uint8_t pa_bias = enable ? kPaBiasOperational : kPaBiasRxSafe; // Operational vs safe bias
-    DIAG("BF", "setPABias(%s): bias=0x%02X", enable ? "ON" : "OFF", pa_bias);
-
-    for (uint8_t dev = 0; dev < devices_.size(); ++dev) {
-        adarWrite(dev, REG_PA_CH1_BIAS_ON, pa_bias, BROADCAST_OFF);
-        adarWrite(dev, REG_PA_CH2_BIAS_ON, pa_bias, BROADCAST_OFF);
-        adarWrite(dev, REG_PA_CH3_BIAS_ON, pa_bias, BROADCAST_OFF);
-        adarWrite(dev, REG_PA_CH4_BIAS_ON, pa_bias, BROADCAST_OFF);
-    }
-}
-
-void ADAR1000Manager::setLNABias(bool enable) {
-    uint8_t lna_bias = enable ? kLnaBiasOperational : kLnaBiasOff; // Operational vs off
-    DIAG("BF", "setLNABias(%s): bias=0x%02X", enable ? "ON" : "OFF", lna_bias);
-
-    for (uint8_t dev = 0; dev < devices_.size(); ++dev) {
-        adarWrite(dev, REG_LNA_BIAS_ON, lna_bias, BROADCAST_OFF);
-    }
 }
 
 void ADAR1000Manager::delayUs(uint32_t microseconds) {

@@ -19,14 +19,8 @@ public:
     ~ADAR1000Manager();
 
     // System Management
-    bool powerUpSystem();
-    bool powerDownSystem();
     bool initializeAllDevices();
     bool performSystemCalibration();
-
-    // Mode Switching
-    void switchToTXMode();
-    void switchToRXMode();
 
     // Beam Steering
     bool setCustomBeamPattern16(const uint8_t phase_pattern[16], BeamDirection direction);
@@ -89,8 +83,6 @@ public:
     void disablePASupplies();
     void enableLNASupplies();
     void disableLNASupplies();
-    void setPABias(bool enable);
-    void setLNABias(bool enable);
 
     // SPI Communication
     void setChipSelect(uint8_t deviceIndex, bool state);
