@@ -339,7 +339,7 @@ class RadarDashboard(QMainWindow):
             QHeaderView::section {{
                 background-color: {DARK_HIGHLIGHT};
                 color: {DARK_FG};
-                padding: 6px;
+                padding: 6px 12px;
                 border: none;
                 border-right: 1px solid {DARK_BORDER};
                 border-bottom: 1px solid {DARK_BORDER};
@@ -530,14 +530,22 @@ class RadarDashboard(QMainWindow):
 
         self._targets_table_main = QTableWidget()
         self._targets_table_main.setColumnCount(6)
+        # Header text is abbreviated to fit comfortably under Stretch mode —
+        # "Velocity (m/s)" was the only header longer than the column it
+        # got, which clipped the leading 'V' against the section divider.
         self._targets_table_main.setHorizontalHeaderLabels([
-            "Range (m)", "Velocity (m/s)", "Confidence",
+            "Range (m)", "Vel (m/s)", "Confidence",
             "Magnitude", "SNR (dB)", "Track ID",
         ])
         self._targets_table_main.setAlternatingRowColors(True)
         self._targets_table_main.setSelectionBehavior(
             QTableWidget.SelectionBehavior.SelectRows
         )
+        # Headers were rendering with the leading 'V' of "Velocity (m/s)"
+        # close enough to the column divider to look clipped. Stretch keeps
+        # all six columns visible without a horizontal scrollbar; the
+        # QHeaderView::section padding (6px 12px) gives the V daylight from
+        # the divider on the left.
         header = self._targets_table_main.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         tg_layout.addWidget(self._targets_table_main)
@@ -854,9 +862,12 @@ class RadarDashboard(QMainWindow):
         self._agc_always_on_badge = QLabel(
             "AGC: ALWAYS-ON (production policy — MCU runs every frame)"
         )
+        # margin-bottom gives the badge breathing room above the first
+        # tuning row so it reads as a header rather than an inline control.
         self._agc_always_on_badge.setStyleSheet(
             f"background-color: {DARK_SUCCESS}; color: white; "
-            "padding: 6px; font-weight: bold; border-radius: 3px;"
+            "padding: 6px; margin-bottom: 4px; "
+            "font-weight: bold; border-radius: 3px;"
         )
         self._agc_always_on_badge.setWordWrap(True)
         agc_layout.addWidget(self._agc_always_on_badge)
@@ -1027,6 +1038,10 @@ class RadarDashboard(QMainWindow):
         ind_layout = QHBoxLayout(indicator)
         ind_layout.setContentsMargins(12, 8, 12, 8)
 
+        # PR-AB.b follow-up: strip labels share a uniform muted style; only
+        # the value text carries colour to convey state (mode green/info,
+        # sat-total green/amber/red below). Mixed label colours read as
+        # decorative noise rather than meaningful encoding.
         self._agc_mode_lbl = QLabel("AGC: --")
         self._agc_mode_lbl.setStyleSheet(
             f"color: {DARK_FG}; font-size: 16px; font-weight: bold;")
@@ -1034,17 +1049,17 @@ class RadarDashboard(QMainWindow):
 
         self._agc_gain_lbl = QLabel("Gain: --")
         self._agc_gain_lbl.setStyleSheet(
-            f"color: {DARK_INFO}; font-size: 14px;")
+            f"color: {DARK_FG}; font-size: 14px;")
         ind_layout.addWidget(self._agc_gain_lbl)
 
         self._agc_peak_lbl = QLabel("Peak: --")
         self._agc_peak_lbl.setStyleSheet(
-            f"color: {DARK_INFO}; font-size: 14px;")
+            f"color: {DARK_FG}; font-size: 14px;")
         ind_layout.addWidget(self._agc_peak_lbl)
 
         self._agc_sat_total_lbl = QLabel("Total Saturations: 0")
         self._agc_sat_total_lbl.setStyleSheet(
-            f"color: {DARK_SUCCESS}; font-size: 14px; font-weight: bold;")
+            f"color: {DARK_FG}; font-size: 14px; font-weight: bold;")
         ind_layout.addWidget(self._agc_sat_total_lbl)
 
         ind_layout.addStretch()
@@ -1243,12 +1258,15 @@ class RadarDashboard(QMainWindow):
         row = 0
 
         note = QLabel(
-            "These settings control host-side DSP that runs AFTER the FPGA "
+            "<i>These settings control host-side DSP that runs AFTER the FPGA "
             "processing pipeline. FPGA-side MTI, CFAR, and DC notch are "
-            "controlled from the FPGA Control tab."
+            "controlled from the FPGA Control tab.</i>"
         )
         note.setWordWrap(True)
-        note.setStyleSheet(f"color: {DARK_WARNING}; padding: 6px;")
+        # PR-AB.b follow-up: was DARK_WARNING (orange) — but this is an
+        # explanation, not a caution. Match the italic/info style used by
+        # the Bench note below so equally-informational text reads uniformly.
+        note.setStyleSheet(f"color: {DARK_INFO}; font-size: 10px; padding: 6px;")
         p_layout.addWidget(note, row, 0, 1, 2)
         row += 1
 
