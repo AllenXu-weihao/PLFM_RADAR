@@ -143,7 +143,8 @@ module usb_data_interface_ft2232h (
     input wire status_request,
     input wire [15:0] status_cfar_threshold,
     input wire [5:0]  status_stream_ctrl,
-    input wire [1:0]  status_radar_mode,
+    // status_radar_mode + status_range_mode retired in PR-AB.b expanded.
+    // Bits in status_words[0][23:22] and status_words[4][1:0] are reserved 0.
     input wire [15:0] status_long_chirp,
     input wire [15:0] status_long_listen,
     input wire [15:0] status_guard,
@@ -152,7 +153,6 @@ module usb_data_interface_ft2232h (
     input wire [15:0] status_medium_chirp,     // M-5: status_words[7][31:16] readback
     input wire [15:0] status_medium_listen,    // M-5: status_words[7][15:0]  readback
     input wire [5:0]  status_chirps_per_elev,
-    input wire [1:0]  status_range_mode,
     input wire        status_chirps_mismatch,  // TX-G: host requested chirps != Doppler FFT size
 
     // Self-test status readback
@@ -872,10 +872,10 @@ always @(posedge ft_clk or negedge ft_effective_reset_n) begin
 
         // Status snapshot on request
         if (status_req_ft) begin
-            // Word 0: {0xFF, mode[1:0], stream[5:0], threshold[15:0]}
-            // NOTE: stream_ctrl now 6-bit. Pack as: {0xFF, mode, stream[5:3], stream[2:0], threshold}
-            // Keep backward-compatible layout: {0xFF[31:24], mode[23:22], stream[21:16], threshold[15:0]}
-            status_words[0] <= {8'hFF, status_radar_mode, status_stream_ctrl, status_cfar_threshold};
+            // Word 0: {0xFF[31:24], reserved[23:22]=0, stream[21:16], threshold[15:0]}
+            // mode bits retired in PR-AB.b expanded — single-mode FSM has no mode field.
+            // Layout preserved for parser compatibility; bits [23:22] always 0.
+            status_words[0] <= {8'hFF, 2'd0, status_stream_ctrl, status_cfar_threshold};
             status_words[1] <= {status_long_chirp, status_long_listen};
             status_words[2] <= {status_guard, status_short_chirp};
             status_words[3] <= {status_short_listen, 10'd0, status_chirps_per_elev};
@@ -885,7 +885,7 @@ always @(posedge ft_clk or negedge ft_effective_reset_n) begin
                                 status_agc_enable,              // [11]
                                 status_chirps_mismatch,         // [10] TX-G mismatch flag
                                 alpha_soft_sync_1,              // [9:2] PR-G: host_cfar_alpha_soft echo (Q4.4)
-                                status_range_mode};             // [1:0]
+                                2'd0};                          // [1:0] reserved (was range_mode, retired PR-AB.b expanded)
             // Word 5: {frame_drop_count[31:25], self_test_busy[24],
             //          reserved[23:16], self_test_detail[15:8], reserved[7],
             //          cic_fir_overrun[6], range_decim_watchdog[5],

@@ -47,11 +47,6 @@
 //   useful and the change is benign — revisit in PR-H if a finer gate is
 //   needed.
 //
-// Beam steering:
-//   elevation_counter / azimuth_counter remain on clk_100m and are bumped
-//   by the STM32 toggle inputs (independent of the chirp FSM), unchanged
-//   from v1.
-//
 // chirp_counter:
 //   Increments by 1 each time we leave ST_CHIRP (i.e. one chirp finished).
 //   Cleared on frame_pulse_120m so it tracks chirp index within the current
@@ -62,9 +57,7 @@
 // ============================================================================
 module plfm_chirp_controller_v2 (
     input  wire        clk_120m,
-    input  wire        clk_100m,
     input  wire        reset_n,        // 120m-domain reset
-    input  wire        reset_100m_n,   // 100m-domain reset (elev/az counters)
 
     input  wire        mixers_enable,  // CDC-synced to clk_120m
 
@@ -72,10 +65,6 @@ module plfm_chirp_controller_v2 (
     input  wire        dst_chirp_valid,
     input  wire [1:0]  dst_wave_sel,
     input  wire        frame_pulse_120m,
-
-    // STM32 beam-step toggle inputs (clk_100m, edge-detected upstream)
-    input  wire        new_elevation,
-    input  wire        new_azimuth,
 
     // DAC outputs
     output reg  [7:0]  chirp_data,
@@ -100,10 +89,8 @@ module plfm_chirp_controller_v2 (
     output reg         adar_tr_3,
     output reg         adar_tr_4,
 
-    // Status counters
-    output reg  [5:0]  chirp_counter,
-    output reg  [5:0]  elevation_counter,
-    output reg  [5:0]  azimuth_counter
+    // Status counter
+    output reg  [5:0]  chirp_counter
 );
 
 // ----------------------------------------------------------------------------
@@ -112,10 +99,6 @@ module plfm_chirp_controller_v2 (
 localparam SHORT_SAMPLES  = 12'd120;
 localparam MEDIUM_SAMPLES = 12'd600;
 localparam LONG_SAMPLES   = 12'd3600;
-
-// Beam ranges
-parameter ELEVATION_MAX = 31;
-parameter AZIMUTH_MAX   = 50;
 
 // ----------------------------------------------------------------------------
 // FSM
@@ -263,31 +246,6 @@ always @(posedge clk_120m or negedge reset_n) begin
         rf_switch_ctrl <= 1'b0;
         {adar_tr_1, adar_tr_2, adar_tr_3, adar_tr_4} <= 4'b0000;
         sample_counter <= 12'd0;
-    end
-end
-
-// ----------------------------------------------------------------------------
-// Beam steering counters (clk_100m, independent of chirp FSM) — unchanged from v1.
-// ----------------------------------------------------------------------------
-always @(posedge clk_100m or negedge reset_100m_n) begin
-    if (!reset_100m_n) begin
-        elevation_counter <= 6'd1;
-    end else if (new_elevation) begin
-        if (elevation_counter == ELEVATION_MAX)
-            elevation_counter <= 6'd1;
-        else
-            elevation_counter <= elevation_counter + 6'd1;
-    end
-end
-
-always @(posedge clk_100m or negedge reset_100m_n) begin
-    if (!reset_100m_n) begin
-        azimuth_counter <= 6'd1;
-    end else if (new_azimuth) begin
-        if (azimuth_counter == AZIMUTH_MAX)
-            azimuth_counter <= 6'd1;
-        else
-            azimuth_counter <= azimuth_counter + 6'd1;
     end
 end
 

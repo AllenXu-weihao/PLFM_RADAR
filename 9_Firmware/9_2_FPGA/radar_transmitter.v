@@ -12,22 +12,17 @@
 //      - frame_pulse → toggle CDC → 1-cycle pulse on clk_120m_dac for
 //        chirp_counter clear and the new_chirp_frame status output.
 //
-// Beam steering:
-//   stm32_new_elevation / stm32_new_azimuth still run through edge detectors
-//   on clk_100m and feed the controller's internal beam counters. These are
-//   independent of the chirp FSM and unchanged from chirp-v1.
-//
-// stm32_new_chirp:
-//   Removed from this module — the scheduler in receiver_final now owns chirp
-//   timing. The top-level GPIO is still wired to receiver_final via
-//   stm32_new_chirp_rx; the transmitter has no separate path.
+// Beam-step GPIOs (stm32_new_elevation / stm32_new_azimuth) were retired
+// in PR-AB.b expanded (2026-05-11). The FPGA-side elev/az counters they
+// drove had no host consumer (status pack didn't carry them, GUI reads
+// MCU software counters via USB-CDC instead). PD9 / PD10 are now free.
 //////////////////////////////////////////////////////////////////////////////////
 module radar_transmitter(
     // System Clocks
     input wire clk_100m,           // System clock
     input wire clk_120m_dac,       // 120MHz DAC clock
     input wire reset_n,            // Reset synchronized to clk_120m_dac
-    input wire reset_100m_n,       // Reset synchronized to clk_100m (for edge detectors/CDC)
+    input wire reset_100m_n,       // Reset synchronized to clk_100m (for CDC)
 
     // DAC Interface
     output wire [7:0] dac_data,
@@ -41,9 +36,7 @@ module radar_transmitter(
     input wire        sched_chirp_pulse,
     input wire        sched_frame_pulse,
 
-    // STM32 Control Interface (chirp moved to scheduler; beam-step still here)
-    input wire stm32_new_elevation,
-    input wire stm32_new_azimuth,
+    // STM32 master enable (mixers_enable, CDC-synced to clk_120m_dac here)
     input wire stm32_mixers_enable,
 
     output wire fpga_rf_switch,
@@ -79,9 +72,7 @@ module radar_transmitter(
     output wire stm32_cs_adar3_1v8,
     output wire stm32_cs_adar4_1v8,
 
-    // Beam Position Tracking
-    output wire [5:0] current_elevation,
-    output wire [5:0] current_azimuth,
+    // Live chirp-index telemetry (clk_120m_dac, sync'd back at top level)
     output wire [5:0] current_chirp,
     output wire new_chirp_frame
 );
@@ -97,14 +88,6 @@ assign stm32_cs_adar1_1v8   = stm32_cs_adar1_3v3;
 assign stm32_cs_adar2_1v8   = stm32_cs_adar2_3v3;
 assign stm32_cs_adar3_1v8   = stm32_cs_adar3_3v3;
 assign stm32_cs_adar4_1v8   = stm32_cs_adar4_3v3;
-
-// Beam-step edge detection (STM32 GPIO -> clk_100m pulses)
-wire new_elevation_pulse;
-wire new_azimuth_pulse;
-
-// CDC: Synchronized versions of async STM32 GPIO inputs to clk_100m
-wire stm32_new_elevation_sync;
-wire stm32_new_azimuth_sync;
 
 // CDC: stm32_mixers_enable into clk_120m_dac domain
 wire mixers_enable_120m;
@@ -183,56 +166,17 @@ cdc_single_bit #(.STAGES(3)) cdc_mixers_en_120m (
 );
 
 // ============================================================================
-// Beam-step CDC + edge detection (clk_100m, unchanged from v1)
-// ============================================================================
-cdc_single_bit #(.STAGES(2)) cdc_stm32_elevation (
-    .src_clk(clk_100m),
-    .dst_clk(clk_100m),
-    .reset_n(reset_100m_n),
-    .src_signal(stm32_new_elevation),
-    .dst_signal(stm32_new_elevation_sync)
-);
-
-cdc_single_bit #(.STAGES(2)) cdc_stm32_azimuth (
-    .src_clk(clk_100m),
-    .dst_clk(clk_100m),
-    .reset_n(reset_100m_n),
-    .src_signal(stm32_new_azimuth),
-    .dst_signal(stm32_new_azimuth_sync)
-);
-
-edge_detector_enhanced elevation_edge (
-    .clk(clk_100m),
-    .reset_n(reset_100m_n),
-    .signal_in(stm32_new_elevation_sync),
-    .rising_falling_edge(new_elevation_pulse)
-);
-
-edge_detector_enhanced azimuth_edge (
-    .clk(clk_100m),
-    .reset_n(reset_100m_n),
-    .signal_in(stm32_new_azimuth_sync),
-    .rising_falling_edge(new_azimuth_pulse)
-);
-
-// ============================================================================
 // PLFM Chirp Generator (chirp-v2)
 // ============================================================================
 plfm_chirp_controller_v2 plfm_chirp_inst (
     .clk_120m       (clk_120m_dac),
-    .clk_100m       (clk_100m),
     .reset_n        (reset_n),
-    .reset_100m_n   (reset_100m_n),
     .mixers_enable  (mixers_enable_120m),
 
     // Scheduler bridge (clk_120m_dac, post-CDC)
     .dst_chirp_valid (dst_chirp_valid),
     .dst_wave_sel    (dst_wave_sel),
     .frame_pulse_120m(frame_pulse_120m),
-
-    // Beam-step pulses (clk_100m)
-    .new_elevation  (new_elevation_pulse),
-    .new_azimuth    (new_azimuth_pulse),
 
     // DAC outputs
     .chirp_data     (chirp_data),
@@ -257,10 +201,8 @@ plfm_chirp_controller_v2 plfm_chirp_inst (
     .adar_tr_3      (adar_tr_3),
     .adar_tr_4      (adar_tr_4),
 
-    // Status counters
-    .chirp_counter    (current_chirp),
-    .elevation_counter(current_elevation),
-    .azimuth_counter  (current_azimuth)
+    // Live chirp-index telemetry
+    .chirp_counter  (current_chirp)
 );
 
 // ============================================================================

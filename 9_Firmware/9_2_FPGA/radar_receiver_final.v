@@ -35,13 +35,8 @@ module radar_receiver_final (
     output wire [15:0] decimated_range_mag_out,
     output wire decimated_range_valid_out,
     
-    // Host command inputs (Gap 4: USB Read Path, CDC-synchronized)
-    // CDC-synchronized in radar_system_top.v before reaching here
-    input wire [1:0] host_mode,      // Radar mode: 00=STM32, 01=auto-scan, 10=single-chirp
-    input wire host_trigger,          // Single-chirp trigger pulse (1 clk cycle)
-    input wire [1:0] host_range_mode, // Range mode: 00=3km (short only), 01=long-range (dual chirp)
-
-    // Gap 2: Host-configurable chirp timing (CDC-synchronized in radar_system_top.v)
+    // Host command inputs (CDC-synchronized in radar_system_top.v)
+    // Gap 2: Host-configurable chirp timing
     input wire [15:0] host_long_chirp_cycles,
     input wire [15:0] host_long_listen_cycles,
     input wire [15:0] host_guard_cycles,
@@ -67,14 +62,6 @@ module radar_receiver_final (
     input wire [3:0]  host_agc_attack,      // 0x2A: gain-down step on clipping
     input wire [3:0]  host_agc_decay,       // 0x2B: gain-up step when weak
     input wire [3:0]  host_agc_holdoff,     // 0x2C: frames before gain-up
-
-    // STM32 toggle signals for mode 00 (STM32-driven) pass-through.
-    // These are CDC-synchronized in radar_system_top.v / radar_transmitter.v
-    // before reaching this module. In mode 00, the RX mode controller uses
-    // these to synchronize receiver processing with STM32-timed chirps.
-    input wire stm32_new_chirp_rx,
-    input wire stm32_new_elevation_rx,
-    input wire stm32_new_azimuth_rx,
 
     // PR-E: master mixers_enable in clk_100m domain — gates the scheduler
     // so it stays in S_IDLE until the operator turns the radar on.
@@ -151,8 +138,6 @@ wire frame_pulse;          // unused on RX in PR-D; PR-F doppler driver
 wire [5:0] sched_chirp_counter;
 wire [1:0] sched_subframe_id;
 wire [15:0] sched_cfg_chirp_cycles, sched_cfg_listen_cycles, sched_cfg_guard_cycles;
-wire sched_track_mode_active;
-wire [5:0] sched_track_beam_az, sched_track_beam_el;
 
 wire [1:0] segment_request;
 wire mem_request;
@@ -239,7 +224,6 @@ chirp_scheduler sched (
     .mixers_enable(mixers_enable_100m),
     .clk(clk),
     .reset_n(reset_n),
-    .host_mode(host_mode),
     // PR-U / M-8: routed from radar_system_top opcode 0x19 (was the
     // RP_DEF_SUBFRAME_ENABLE constant — host had no way to mask sub-frames).
     .host_subframe_enable(host_subframe_enable),
@@ -252,16 +236,6 @@ chirp_scheduler sched (
     .host_long_listen_cycles(host_long_listen_cycles),
     .host_guard_cycles(host_guard_cycles),
     .host_chirps_per_subframe(6'd`RP_DEF_CHIRPS_PER_SUBFRAME),
-    .host_trigger(host_trigger),
-    .host_debug_wave_sel(`RP_WAVE_SHORT),
-    .host_track_request(1'b0),
-    .host_track_wave_sel(`RP_WAVE_SHORT),
-    .host_track_chirp_count(`RP_DEF_TRACK_CHIRP_COUNT),
-    .host_track_beam_az(6'd0),
-    .host_track_beam_el(6'd0),
-    .stm32_new_chirp   (stm32_new_chirp_rx),
-    .stm32_new_subframe(stm32_new_elevation_rx),
-    .stm32_new_frame   (stm32_new_azimuth_rx),
     .wave_sel(wave_sel),
     .chirp_pulse(chirp_pulse),
     .subframe_pulse(subframe_pulse),
@@ -270,10 +244,7 @@ chirp_scheduler sched (
     .subframe_id(sched_subframe_id),
     .cfg_chirp_cycles (sched_cfg_chirp_cycles),
     .cfg_listen_cycles(sched_cfg_listen_cycles),
-    .cfg_guard_cycles (sched_cfg_guard_cycles),
-    .track_mode_active(sched_track_mode_active),
-    .track_beam_az(sched_track_beam_az),
-    .track_beam_el(sched_track_beam_el)
+    .cfg_guard_cycles (sched_cfg_guard_cycles)
 );
 
 // PR-E: forward scheduler pulses + wave_sel to the TX-side CDC bridge in
@@ -324,30 +295,14 @@ ad9484_interface_400m adc (
 // via 2FF. Single-bit, low→high-only once latched, so a 2FF sync is
 // sufficient for a GPIO-class diagnostic.
 //
-// F-7.7 fix: clear path now follows the same `clear_monitors_pulse` wire
-// as the DDC's `reset_monitors` port (see ddc instance below). Today
-// clear_monitors_pulse is tied 1'b0, matching the prior reset_n-only
-// behaviour; once a host opcode for "clear diagnostic stickies" lands,
-// both this OR sticky and the DDC's overrun/saturation flags clear from
-// the same edge — no per-flag re-plumbing needed.
-//
-// Compare with ddc_400m.v `cdc_cic_fir_overrun_sticky` which already
-// uses reset_monitors as a clear, and the new symmetric path here keeps
-// the AD9484 overrange diagnostic consistent.
-//
-// Audit M-11: `force_saturation_pulse` is the symmetric hook for the DDC's
-// debug `force_saturation` input (forces the saturation flag high for
-// validation campaigns). Today it is tied 1'b0 — the DDC saturation path
-// is exercised only by real overflow conditions. When a future host opcode
-// surface for "diagnostic force/clear" lands, both this pulse and
-// clear_monitors_pulse below get driven from the same dispatcher.
-wire force_saturation_pulse = 1'b0;  // future host-driven force hook
-wire clear_monitors_pulse   = 1'b0;  // future host-driven clear hook
+// Cleared only by reset_n: the FPGA exposes no host-driven clear opcode
+// today, so any path that wants the sticky to drop has to go through a
+// full chip reset. A real host clear is a future bundled PR (opcode +
+// ft_clk→clk_400m CDC + matching plumbing for the DDC stickies). See
+// project_aeris10_clear_monitors_opcode_future.md.
 reg  adc_overrange_sticky_400m;
 always @(posedge clk_400m or negedge reset_n) begin
     if (!reset_n)
-        adc_overrange_sticky_400m <= 1'b0;
-    else if (clear_monitors_pulse)
         adc_overrange_sticky_400m <= 1'b0;
     else if (adc_overrange_400m)
         adc_overrange_sticky_400m <= 1'b1;
@@ -411,13 +366,11 @@ ddc_400m_enhanced ddc(
     // Test/debug inputs — explicit tie-low (were floating)
     .test_mode(2'b00),
     .test_phase_inc(16'h0000),
-    // M-11: routed through `force_saturation_pulse` so a future host
-    // opcode can exercise the DDC saturation path alongside the clear hook.
-    .force_saturation(force_saturation_pulse),
-    // F-7.7: routed through the shared clear_monitors_pulse wire so the
-    // DDC's internal stickies and the AD9484 OR sticky above clear from
-    // the same future host opcode.
-    .reset_monitors(clear_monitors_pulse),
+    // No host-driven clear/force opcode exists today; both ports tied 1'b0.
+    // See project_aeris10_clear_monitors_opcode_future.md for the bundled-PR
+    // shape required to activate them (opcode + CDC + matching top-level hook).
+    .force_saturation(1'b0),
+    .reset_monitors(1'b0),
     .debug_sample_count(),
     .debug_internal_i(),
     .debug_internal_q(),

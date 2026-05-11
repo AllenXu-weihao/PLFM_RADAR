@@ -76,10 +76,11 @@ module radar_system_top (
     
     // ========== STM32 CONTROL INTERFACES ==========
     
-    // Chirp/Beam Control (toggle signals from STM32)
+    // STM32 → FPGA control (PD8/PD11). PD9/PD10 (was stm32_new_elevation /
+    // stm32_new_azimuth) retired in PR-AB.b expanded — see commit 3 for the
+    // XDC + MCU GPIO scrub. stm32_new_chirp will be renamed to
+    // stm32_beam_ready in commit 5 (beam-ready handshake).
     input wire stm32_new_chirp,
-    input wire stm32_new_elevation,
-    input wire stm32_new_azimuth,
     input wire stm32_mixers_enable,
     
     // ========== FT601 USB 3.0 INTERFACE ==========
@@ -116,10 +117,8 @@ module radar_system_top (
     output wire ft_siwu,                  // Send Immediate / WakeUp
 
     // ========== STATUS OUTPUTS ==========
-    
-    // Beam position tracking
-    output wire [5:0] current_elevation,
-    output wire [5:0] current_azimuth,
+
+    // Live chirp-index telemetry (TX-side counter sync'd back to clk_100m)
     output wire [5:0] current_chirp,
     output wire new_chirp_frame,
     
@@ -171,8 +170,6 @@ wire tx_chirp_valid;
 wire tx_chirp_done;
 wire tx_new_chirp_frame;        // In clk_120m_dac domain
 wire tx_new_chirp_frame_sync;   // Synchronized to clk_100m domain
-wire [5:0] tx_current_elevation;
-wire [5:0] tx_current_azimuth;
 wire [5:0] tx_current_chirp;       // In clk_120m_dac domain
 wire [5:0] tx_current_chirp_sync;  // Synchronized to clk_100m domain
 wire tx_current_chirp_sync_valid;
@@ -275,8 +272,6 @@ wire [15:0] usb_cmd_value;
 
 // USB command decode registers (clk_100m domain, driven by CDC block below)
 // Declared here (before rx_inst) so Icarus Verilog can resolve forward refs.
-reg [1:0]  host_radar_mode;
-reg        host_trigger_pulse;
 reg [15:0] host_detect_threshold;  // (was host_cfar_threshold)
 reg [5:0]  host_stream_control;
 
@@ -313,14 +308,6 @@ reg        host_status_request;       // Opcode 0xFF (self-clearing pulse)
 // Clamp at command decode and flag the mismatch so the host knows.
 localparam DOPPLER_FRAME_CHIRPS = `RP_CHIRPS_PER_FRAME; // 48 (PR-F); was 32
 reg        chirps_mismatch_error;     // Set if host tried to set chirps != FFT size
-
-// Range-mode register (opcode 0x20)
-// Controls chirp type selection in the mode controller:
-//   2'b00 = 3 km mode (all short chirps — long blind zone > max range)
-//   2'b01 = Long-range (dual chirp: first half long, second half short)
-//   2'b10 = Reserved
-//   2'b11 = Reserved
-reg [1:0]  host_range_mode;
 
 // CFAR configuration registers (host-configurable via USB)
 reg [3:0]  host_cfar_guard;       // Opcode 0x21: guard cells per side (0..8)
@@ -540,9 +527,7 @@ radar_transmitter tx_inst (
     .sched_chirp_pulse(sched_chirp_pulse),
     .sched_frame_pulse(sched_frame_pulse),
 
-    // STM32 Control Interface (chirp moved to scheduler — only beam-step here)
-    .stm32_new_elevation(stm32_new_elevation),
-    .stm32_new_azimuth(stm32_new_azimuth),
+    // STM32 master enable (mixers_enable)
     .stm32_mixers_enable(stm32_mixers_enable),
 
     // RF Switch Control
@@ -579,9 +564,7 @@ radar_transmitter tx_inst (
     .stm32_cs_adar3_1v8(stm32_cs_adar3_1v8),
     .stm32_cs_adar4_1v8(stm32_cs_adar4_1v8),
     
-    // Beam Position Tracking
-    .current_elevation(tx_current_elevation),
-    .current_azimuth(tx_current_azimuth),
+    // Live chirp-index telemetry
     .current_chirp(tx_current_chirp),
     .new_chirp_frame(tx_new_chirp_frame)
 );
@@ -621,9 +604,6 @@ radar_receiver_final rx_inst (
     .decimated_range_mag_out(rx_range_profile_decimated),
     .decimated_range_valid_out(rx_range_profile_decimated_valid),
     
-    .host_mode(host_radar_mode),
-    .host_trigger(host_trigger_pulse),
-    .host_range_mode(host_range_mode),
     // Gap 2: Host-configurable chirp timing
     .host_long_chirp_cycles(host_long_chirp_cycles),
     .host_long_listen_cycles(host_long_listen_cycles),
@@ -645,11 +625,6 @@ radar_receiver_final rx_inst (
     .host_agc_attack(host_agc_attack),
     .host_agc_decay(host_agc_decay),
     .host_agc_holdoff(host_agc_holdoff),
-    // STM32 toggle signals for the RX scheduler (mode 00 pass-through).
-    // Raw GPIO inputs — chirp_scheduler's edge detectors handle debouncing.
-    .stm32_new_chirp_rx(stm32_new_chirp),
-    .stm32_new_elevation_rx(stm32_new_elevation),
-    .stm32_new_azimuth_rx(stm32_new_azimuth),
     // PR-E: master enable for the scheduler (CDC-sync'd to clk_100m above)
     .mixers_enable_100m(stm32_mixers_enable_100m),
     // CFAR: Doppler frame-complete pulse
@@ -903,14 +878,12 @@ if (USB_MODE == 0) begin : gen_ft601
         .status_request(host_status_request),
         .status_cfar_threshold(host_detect_threshold),
         .status_stream_ctrl(host_stream_control),
-        .status_radar_mode(host_radar_mode),
         .status_long_chirp(host_long_chirp_cycles),
         .status_long_listen(host_long_listen_cycles),
         .status_guard(host_guard_cycles),
         .status_short_chirp(host_short_chirp_cycles),
         .status_short_listen(host_short_listen_cycles),
         .status_chirps_per_elev(host_chirps_per_elev),
-        .status_range_mode(host_range_mode),
         .status_chirps_mismatch(chirps_mismatch_error),
 
         // Self-test status readback
@@ -996,7 +969,6 @@ end else begin : gen_ft2232h
         .status_request(host_status_request),
         .status_cfar_threshold(host_detect_threshold),
         .status_stream_ctrl(host_stream_control),
-        .status_radar_mode(host_radar_mode),
         .status_long_chirp(host_long_chirp_cycles),
         .status_long_listen(host_long_listen_cycles),
         .status_guard(host_guard_cycles),
@@ -1006,7 +978,6 @@ end else begin : gen_ft2232h
         .status_medium_chirp(host_medium_chirp_cycles),
         .status_medium_listen(host_medium_listen_cycles),
         .status_chirps_per_elev(host_chirps_per_elev),
-        .status_range_mode(host_range_mode),
         .status_chirps_mismatch(chirps_mismatch_error),
 
         // Self-test status readback
@@ -1101,14 +1072,12 @@ wire cmd_valid_100m = cmd_valid_toggle_100m ^ cmd_valid_toggle_100m_prev;
 // Step 4: Command decode registers in clk_100m domain
 // Sample cmd_data fields when CDC'd valid pulse arrives. Data is stable
 // because the read FSM holds cmd_opcode/addr/value until the next command.
-// NOTE: reg declarations for host_radar_mode, host_trigger_pulse,
-// host_detect_threshold, host_stream_control are in INTERNAL SIGNALS section
-// above (before rx_inst) to avoid Icarus Verilog forward-reference errors.
+// NOTE: reg declarations for host_detect_threshold, host_stream_control are
+// in INTERNAL SIGNALS section above (before rx_inst) to avoid Icarus Verilog
+// forward-reference errors.
 
 always @(posedge clk_100m_buf or negedge sys_reset_n) begin
     if (!sys_reset_n) begin
-        host_radar_mode    <= 2'b01;   // Default: auto-scan
-        host_trigger_pulse <= 1'b0;
         host_detect_threshold <= 16'd10000; // Default threshold
         host_stream_control <= `RP_STREAM_CTRL_DEFAULT; // Default: all streams, mag-only mode
         host_gain_shift     <= 4'd0;      // Default: pass-through (no gain change)
@@ -1129,7 +1098,6 @@ always @(posedge clk_100m_buf or negedge sys_reset_n) begin
         host_subframe_enable      <= `RP_DEF_SUBFRAME_ENABLE;
         host_status_request     <= 1'b0;
         chirps_mismatch_error   <= 1'b0;
-        host_range_mode         <= 2'b00;     // Default: 3 km mode (all short chirps)
         // CFAR defaults (disabled by default — backward-compatible)
         host_cfar_guard         <= 4'd2;      // 2 guard cells each side
         host_cfar_train         <= 5'd8;      // 8 training cells each side
@@ -1155,13 +1123,12 @@ always @(posedge clk_100m_buf or negedge sys_reset_n) begin
         // this fix, so existing bringup behavior is preserved).
         host_adc_pwdn           <= 1'b0;
     end else begin
-        host_trigger_pulse <= 1'b0;    // Self-clearing pulse
         host_status_request <= 1'b0;   // Self-clearing pulse
         host_self_test_trigger <= 1'b0;  // Self-clearing pulse
         if (cmd_valid_100m) begin
             case (usb_cmd_opcode)
-                8'h01: host_radar_mode     <= usb_cmd_value[1:0];
-                8'h02: host_trigger_pulse  <= 1'b1;
+                // 0x01 (RADAR_MODE) and 0x02 (TRIGGER_PULSE) retired in
+                // PR-AB.b expanded — single-mode FSM has no mode field.
                 8'h03: host_detect_threshold <= usb_cmd_value;
                 // PR-G: protocol v2 has a single canonical encoding
                 // (Manhattan-mag doppler + 2-bit dense detect). Bits [5:3] of
@@ -1199,7 +1166,9 @@ always @(posedge clk_100m_buf or negedge sys_reset_n) begin
                     end
                 end
                 8'h16: host_gain_shift         <= usb_cmd_value[3:0];  // Fix 3: digital gain
-                8'h20: host_range_mode         <= usb_cmd_value[1:0];  // Range mode
+                // 0x20 (RANGE_MODE) retired in PR-AB.b expanded — runtime
+                // 3km/20km presentation is driven by host_subframe_enable +
+                // per-waveform chirp/listen-cycles on a 200T build.
                 // CFAR configuration opcodes
                 8'h21: host_cfar_guard         <= usb_cmd_value[3:0];
                 8'h22: host_cfar_train         <= usb_cmd_value[4:0];
@@ -1238,8 +1207,6 @@ end
 // OUTPUT ASSIGNMENTS
 // ============================================================================
 
-assign current_elevation = tx_current_elevation;
-assign current_azimuth = tx_current_azimuth;
 assign current_chirp = tx_current_chirp_sync;        // Use CDC-synchronized version
 assign new_chirp_frame = tx_new_chirp_frame_sync;    // Use CDC-synchronized version
 

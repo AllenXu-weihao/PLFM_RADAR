@@ -86,14 +86,14 @@ module usb_data_interface (
     input wire status_request,                 // 1-cycle pulse in clk_100m when 0xFF received
     input wire [15:0] status_cfar_threshold,   // Current CFAR threshold
     input wire [5:0]  status_stream_ctrl,      // Current stream control (6-bit: [2:0]=stream en, [5:3]=format)
-    input wire [1:0]  status_radar_mode,       // Current radar mode
+    // status_radar_mode + status_range_mode retired in PR-AB.b expanded.
+    // Bits in status_words[0][23:22] and status_words[4][1:0] are reserved 0.
     input wire [15:0] status_long_chirp,       // Current long chirp cycles
     input wire [15:0] status_long_listen,      // Current long listen cycles
     input wire [15:0] status_guard,            // Current guard cycles
     input wire [15:0] status_short_chirp,      // Current short chirp cycles
     input wire [15:0] status_short_listen,     // Current short listen cycles
     input wire [5:0]  status_chirps_per_elev,  // Current chirps per elevation
-    input wire [1:0]  status_range_mode,       // Fix 7: Current range mode (0x20)
     input wire        status_chirps_mismatch,  // TX-G: host requested chirps != Doppler FFT size
 
     // Self-test status readback (opcode 0x31 / included in 0xFF status packet)
@@ -399,8 +399,9 @@ always @(posedge ft601_clk_in or negedge ft601_effective_reset_n) begin
         // Gap 2: Capture status snapshot when request arrives in ft601 domain
         if (status_req_ft601) begin
             // Pack register values into 5x 32-bit status words
-            // Word 0: {0xFF[31:24], mode[23:22], stream[21:16], threshold[15:0]}
-            status_words[0] <= {8'hFF, status_radar_mode, status_stream_ctrl,
+            // Word 0: {0xFF[31:24], reserved[23:22]=0, stream[21:16], threshold[15:0]}
+            // (mode bits retired in PR-AB.b expanded — single-mode FSM)
+            status_words[0] <= {8'hFF, 2'd0, status_stream_ctrl,
                                 status_cfar_threshold};
             // Word 1: {long_chirp_cycles[15:0], long_listen_cycles[15:0]}
             status_words[1] <= {status_long_chirp, status_long_listen};
@@ -408,14 +409,14 @@ always @(posedge ft601_clk_in or negedge ft601_effective_reset_n) begin
             status_words[2] <= {status_guard, status_short_chirp};
             // Word 3: {short_listen_cycles[15:0], chirps_per_elev[5:0], 10'b0}
             status_words[3] <= {status_short_listen, 10'd0, status_chirps_per_elev};
-            // Word 4: AGC metrics + range_mode
+            // Word 4: AGC metrics (range_mode retired in PR-AB.b expanded)
             status_words[4] <= {status_agc_current_gain,        // [31:28]
                                 status_agc_peak_magnitude,      // [27:20]
                                 status_agc_saturation_count,    // [19:12] 8-bit saturation count
                                 status_agc_enable,              // [11]
                                 status_chirps_mismatch,         // [10] TX-G mismatch flag
                                 8'd0,                           // [9:2] reserved
-                                status_range_mode};             // [1:0]
+                                2'd0};                          // [1:0] reserved (was range_mode)
             // Word 5: {reserved[6:0], self_test_busy[24], reserved[23:16],
             //          self_test_detail[15:8], reserved[7], cic_fir_overrun[6],
             //          range_decim_watchdog[5], self_test_flags[4:0]}

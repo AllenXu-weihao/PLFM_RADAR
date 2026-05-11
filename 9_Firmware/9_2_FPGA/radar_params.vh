@@ -10,20 +10,15 @@
 // optionally alias macros to localparams for readability.
 //
 // BOARD VARIANTS:
-//   SUPPORT_LONG_RANGE = 0  (50T, USB_MODE=1)  — 3 km mode only
-//   SUPPORT_LONG_RANGE = 1  (200T, USB_MODE=0) — 3 km + 20 km modes
+//   SUPPORT_LONG_RANGE = 0  (50T, USB_MODE=1)  — 3 km build
+//   SUPPORT_LONG_RANGE = 1  (200T, USB_MODE=0) — 3 km + 20 km build
 //
-// RADAR MODES (runtime, via host_radar_mode register, opcode 0x01):
-//   2'b00 = STM32 pass-through (production — STM32 controls chirp timing)
-//   2'b01 = Auto-scan 3 km     (FPGA-timed, short chirps only)
-//   2'b10 = Single-chirp debug (one long chirp per trigger)
-//   2'b11 = Reserved / idle
-//
-// RANGE MODES (runtime, via host_range_mode register, opcode 0x20):
-//   2'b00 = 3 km   (default — pass-through treats all chirps as short)
-//   2'b01 = Long-range (pass-through: first half long, second half short)
-//   2'b10 = Reserved
-//   2'b11 = Reserved
+// The runtime "3 km vs 20 km" presentation on a 200T build is controlled by
+// host_subframe_enable (opcode 0x19, default 3'b111 = all subframes) combined
+// with the per-waveform chirp/listen-cycle opcodes (0x10-0x18). The legacy
+// host_radar_mode opcode 0x01 + host_range_mode opcode 0x20 were stripped in
+// PR-AB.b expanded scope (2026-05-11) along with three dead FSM branches
+// (STM32 pass-through, single-chirp debug, track dwell).
 //
 // USAGE:
 //   `include "radar_params.vh"
@@ -241,8 +236,6 @@
 // LONG defaults reuse RP_DEF_LONG_CHIRP_CYCLES / RP_DEF_LONG_LISTEN_CYCLES
 `define RP_DEF_CHIRPS_PER_SUBFRAME     16      // 16 per sub-frame, 3 sub-frames = 48 frame
 `define RP_DEF_SUBFRAME_ENABLE         3'b111  // SHORT|MEDIUM|LONG all on by default
-`define RP_DEF_TRACK_WATCHDOG_FRAMES   8'd5    // frames without track cmd before scan-fallback
-`define RP_DEF_TRACK_CHIRP_COUNT       9'd64   // default track-mode dwell N
 `define RP_DEF_CFAR_ALPHA_SOFT         8'h18   // 1.5 in Q4.4 — soft threshold for candidates
                                                 // (Pfa_soft ≈ 10⁻⁵; confirm Pfa ≈ 10⁻⁶ at α=3.0)
 
@@ -294,30 +287,6 @@
 `define RP_DEF_DETECT_THRESHOLD     10000
 
 // ============================================================================
-// RADAR MODE ENCODING (host_radar_mode, opcode 0x01)
-// ============================================================================
-`define RP_MODE_STM32_PASSTHROUGH   2'b00
-`define RP_MODE_AUTO_3KM            2'b01
-`define RP_MODE_SINGLE_DEBUG        2'b10
-`define RP_MODE_RESERVED            2'b11
-
-// ============================================================================
-// RANGE MODE ENCODING (host_range_mode, opcode 0x20)
-// ============================================================================
-`define RP_RANGE_MODE_3KM           2'b00
-`define RP_RANGE_MODE_LONG          2'b01
-`define RP_RANGE_MODE_RSVD2         2'b10
-`define RP_RANGE_MODE_RSVD3         2'b11
-
-// ============================================================================
-// RADAR MODE ENCODING — TRACK extension (host_radar_mode, opcode 0x01)
-// ============================================================================
-// Mode 11 ("RESERVED" until PR-D) becomes TRACK mode: scheduler dwells one
-// beam, one waveform, host_track_chirp_count chirps. Doppler runs xfft_64.
-// RP_MODE_RESERVED below is renamed in-place for clarity.
-`define RP_MODE_TRACK               2'b11
-
-// ============================================================================
 // STREAM CONTROL (host_stream_control, opcode 0x04, 6-bit)
 // ============================================================================
 // Bits [2:0]: Stream enable mask
@@ -355,8 +324,9 @@
 // ============================================================================
 // USB OPCODE MAP (PR-G v2 — single source of truth for RTL & GUI parity)
 // ============================================================================
-`define RP_OP_RADAR_MODE            8'h01
-`define RP_OP_TRIGGER_PULSE         8'h02
+// 0x01 (RADAR_MODE) and 0x02 (TRIGGER_PULSE) retired in PR-AB.b expanded
+// (2026-05-11) — single-mode FSM has no mode field to write, no host-driven
+// debug trigger. Reserved; host MUST NOT issue these opcodes.
 `define RP_OP_DETECT_THRESHOLD      8'h03
 `define RP_OP_STREAM_CONTROL        8'h04
 `define RP_OP_LONG_CHIRP_CYCLES     8'h10
@@ -370,7 +340,9 @@
 `define RP_OP_MEDIUM_CHIRP_CYCLES   8'h17
 `define RP_OP_MEDIUM_LISTEN_CYCLES  8'h18
 // 0x19–0x1F reserved (per-waveform guard if needed in future)
-`define RP_OP_RANGE_MODE            8'h20
+// 0x20 (RANGE_MODE) retired in PR-AB.b expanded (2026-05-11) — runtime
+// 3km/20km presentation is driven by host_subframe_enable + per-waveform
+// chirp/listen-cycles on a 200T build.
 `define RP_OP_CFAR_GUARD            8'h21
 `define RP_OP_CFAR_TRAIN            8'h22
 `define RP_OP_CFAR_ALPHA            8'h23   // confirm-tier (Q4.4)

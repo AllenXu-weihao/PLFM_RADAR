@@ -67,9 +67,9 @@ module radar_system_top_50t (
     output wire adc_pwdn,
 
     // ===== STM32 Control (Bank 15: 3.3V) =====
+    // PR-AB.b expanded: stm32_new_elevation/azimuth retired (no consumer).
+    // stm32_new_chirp becomes stm32_beam_ready in commit 5.
     input wire stm32_new_chirp,
-    input wire stm32_new_elevation,
-    input wire stm32_new_azimuth,
     input wire stm32_mixers_enable,
 
     // ===== FT2232H USB 2.0 Interface (Bank 35: 3.3V) =====
@@ -108,8 +108,6 @@ module radar_system_top_50t (
     wire        ft601_oe_n_nc;
     wire        ft601_siwu_n_nc;
     wire        ft601_clk_out_nc;
-    wire [5:0]  current_elevation_nc;
-    wire [5:0]  current_azimuth_nc;
     wire [5:0]  current_chirp_nc;
     wire        new_chirp_frame_nc;
     wire [31:0] dbg_doppler_data_nc;
@@ -181,8 +179,6 @@ module radar_system_top_50t (
 
         // ----- STM32 Control -----
         .stm32_new_chirp        (stm32_new_chirp),
-        .stm32_new_elevation    (stm32_new_elevation),
-        .stm32_new_azimuth      (stm32_new_azimuth),
         .stm32_mixers_enable    (stm32_mixers_enable),
 
         // ----- FT2232H USB 2.0 (active on 50T, USB_MODE=1) -----
@@ -210,8 +206,6 @@ module radar_system_top_50t (
         .ft601_clk_out          (ft601_clk_out_nc),
 
         // ----- Status/Debug (no pins on 50T) -----
-        .current_elevation      (current_elevation_nc),
-        .current_azimuth        (current_azimuth_nc),
         .current_chirp          (current_chirp_nc),
         .new_chirp_frame        (new_chirp_frame_nc),
         .dbg_doppler_data       (dbg_doppler_data_nc),
