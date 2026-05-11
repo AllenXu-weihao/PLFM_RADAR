@@ -12,7 +12,6 @@
 //     active during CHIRP, deassert after
 //   - chirp_counter increments per chirp and clears on frame_pulse_120m
 //   - mixer enables: tx_mixer_en active during CHIRP, rx_mixer_en otherwise
-//   - elevation_counter / azimuth_counter still bump on STM32 toggles
 //
 // Sample counts (must mirror plfm_chirp_controller_v2.v localparams):
 //   SHORT  = 120, MEDIUM = 600, LONG = 3600
@@ -47,8 +46,6 @@ reg        mixers_enable;
 reg        dst_chirp_valid;
 reg [1:0]  dst_wave_sel;
 reg        frame_pulse_120m;
-reg        new_elevation;
-reg        new_azimuth;
 
 wire [7:0] chirp_data;
 wire chirp_valid;
@@ -62,23 +59,17 @@ wire adar_tx_load_3, adar_rx_load_3;
 wire adar_tx_load_4, adar_rx_load_4;
 wire adar_tr_1, adar_tr_2, adar_tr_3, adar_tr_4;
 wire [5:0] chirp_counter;
-wire [5:0] elevation_counter;
-wire [5:0] azimuth_counter;
 
 // =========================================================================
 // DUT
 // =========================================================================
 plfm_chirp_controller_v2 dut (
     .clk_120m(clk_120m),
-    .clk_100m(clk_100m),
     .reset_n(reset_n),
-    .reset_100m_n(reset_100m_n),
     .mixers_enable(mixers_enable),
     .dst_chirp_valid(dst_chirp_valid),
     .dst_wave_sel(dst_wave_sel),
     .frame_pulse_120m(frame_pulse_120m),
-    .new_elevation(new_elevation),
-    .new_azimuth(new_azimuth),
     .chirp_data(chirp_data),
     .chirp_valid(chirp_valid),
     .new_chirp_frame(new_chirp_frame),
@@ -98,9 +89,7 @@ plfm_chirp_controller_v2 dut (
     .adar_tr_2(adar_tr_2),
     .adar_tr_3(adar_tr_3),
     .adar_tr_4(adar_tr_4),
-    .chirp_counter(chirp_counter),
-    .elevation_counter(elevation_counter),
-    .azimuth_counter(azimuth_counter)
+    .chirp_counter(chirp_counter)
 );
 
 // =========================================================================
@@ -179,8 +168,6 @@ initial begin
     dst_chirp_valid  = 0;
     dst_wave_sel     = `RP_WAVE_SHORT;
     frame_pulse_120m = 0;
-    new_elevation    = 0;
-    new_azimuth      = 0;
 
     $display("");
     $display("============================================================");
@@ -199,8 +186,6 @@ initial begin
     check("Reset: rf_switch_ctrl low",   rf_switch_ctrl == 1'b0);
     check("Reset: chirp_done low",       chirp_done == 1'b0);
     check("Reset: chirp_counter == 0",   chirp_counter == 6'd0);
-    check("Reset: elevation_counter==1", elevation_counter == 6'd1);
-    check("Reset: azimuth_counter==1",   azimuth_counter == 6'd1);
 
     @(posedge clk_120m);
     reset_n <= 1;
@@ -286,22 +271,6 @@ initial begin
     check("Mixer disable: tx_mixer_en 0",          tx_mixer_en == 1'b0);
     check("Mixer disable: rx_mixer_en 0",          rx_mixer_en == 1'b0);
     check("Mixer disable: state forced IDLE",      dut.state == 1'b0);
-
-    // ---------- Beam-step counters ----------
-    $display("--- Group 9: Beam steering counters ---");
-    new_elevation = 1;
-    @(posedge clk_100m);
-    @(posedge clk_100m);
-    check("Elevation: increments on toggle",
-          elevation_counter == 6'd2 || elevation_counter == 6'd3);
-    new_elevation = 0;
-
-    new_azimuth = 1;
-    @(posedge clk_100m);
-    @(posedge clk_100m);
-    check("Azimuth: increments on toggle",
-          azimuth_counter == 6'd2 || azimuth_counter == 6'd3);
-    new_azimuth = 0;
 
     // ---------- ADAR load pins tied low ----------
     $display("--- Group 10: ADAR load pins ---");

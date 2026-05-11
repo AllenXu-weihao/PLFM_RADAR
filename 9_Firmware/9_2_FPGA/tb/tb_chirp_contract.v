@@ -38,7 +38,6 @@ reg mixers_enable;
 reg dst_chirp_valid;
 reg [1:0] dst_wave_sel;
 reg frame_pulse_120m;
-reg new_elevation, new_azimuth;
 
 // DUT outputs (subset — only those used in the contract checks)
 wire [7:0] chirp_data;
@@ -53,7 +52,6 @@ wire adar_tx_load_4, adar_rx_load_4;
 wire adar_tr_1, adar_tr_2, adar_tr_3, adar_tr_4;
 wire new_chirp_frame;
 wire [5:0] chirp_counter;
-wire [5:0] elevation_counter, azimuth_counter;
 
 // 120 MHz: period = 8.333 ns
 initial clk_120m = 0;
@@ -66,15 +64,11 @@ always #5 clk_100m = ~clk_100m;
 // ---- DUT ----
 plfm_chirp_controller_v2 dut (
     .clk_120m(clk_120m),
-    .clk_100m(clk_100m),
     .reset_n(reset_n),
-    .reset_100m_n(reset_100m_n),
     .mixers_enable(mixers_enable),
     .dst_chirp_valid(dst_chirp_valid),
     .dst_wave_sel(dst_wave_sel),
     .frame_pulse_120m(frame_pulse_120m),
-    .new_elevation(new_elevation),
-    .new_azimuth(new_azimuth),
     .chirp_data(chirp_data),
     .chirp_valid(chirp_valid),
     .new_chirp_frame(new_chirp_frame),
@@ -94,9 +88,7 @@ plfm_chirp_controller_v2 dut (
     .adar_tr_2(adar_tr_2),
     .adar_tr_3(adar_tr_3),
     .adar_tr_4(adar_tr_4),
-    .chirp_counter(chirp_counter),
-    .elevation_counter(elevation_counter),
-    .azimuth_counter(azimuth_counter)
+    .chirp_counter(chirp_counter)
 );
 
 // ---- Test infrastructure ----
@@ -194,8 +186,6 @@ initial begin
     dst_chirp_valid  = 0;
     dst_wave_sel     = `RP_WAVE_SHORT;
     frame_pulse_120m = 0;
-    new_elevation    = 0;
-    new_azimuth      = 0;
 
     $display("");
     $display("============================================================");
@@ -225,15 +215,9 @@ initial begin
     wait_for_idle(SHORT_SAMPLES + 20);
     check("C5/C6: chirp_counter == 2 after second SHORT chirp", chirp_counter == 6'd2);
 
-    // ---------- C3: stm32 toggles do NOT drive chirp_counter ----------
-    repeat (8) begin
-        new_elevation = ~new_elevation;
-        new_azimuth   = ~new_azimuth;
-        @(posedge clk_100m);
-    end
-    new_elevation = 0;
-    new_azimuth   = 0;
-    check("C3: stm32 toggles do not change chirp_counter", chirp_counter == 6'd2);
+    // C3 (chirp_counter increments only on clk_120m edges) is now structurally
+    // upheld by the RTL: post PR-AB.b expanded strip there is no stm32_new_*
+    // input on the clk_100m side that could spuriously drive the counter.
 
     // ---------- C7: frame_pulse wraps to 0 ----------
     pulse_frame();

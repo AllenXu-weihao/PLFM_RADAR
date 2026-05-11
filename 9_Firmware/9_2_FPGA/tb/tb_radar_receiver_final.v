@@ -166,11 +166,6 @@ radar_receiver_final dut (
     .range_profile_q_out(),
     .range_profile_valid_out(),
 
-    // Host command inputs (Gap 4) — default auto-scan, no trigger
-    .host_mode(2'b01),
-    .host_range_mode(2'b01),     // long-range mode (dual chirp); was missing -> z
-    .host_trigger(1'b0),
-
     // chirp-v2 PR-D: chirp_scheduler is host-input driven. SHORT chirp bumped
     // to 100 cycles (1 µs V2). Host_chirps_per_elev is still wired to keep
     // the parent port list intact, but the scheduler inside the receiver

@@ -27,9 +27,11 @@
 //       (so a future expansion to a multi-bit ADC control field can repurpose
 //       upper bits without breaking back-compat).
 //
-//   T5: Unrelated opcodes (0x33 = host_adc_format, 0x01 = radar_mode) do
-//       NOT disturb host_adc_pwdn — opcode dispatch is properly mutually
-//       exclusive.
+//   T5: Unrelated opcodes (0x33 = host_adc_format, and an unknown opcode)
+//       do NOT disturb host_adc_pwdn — opcode dispatch is properly mutually
+//       exclusive. (Opcode 0x01 = radar_mode was retired in PR-AB.b
+//       expanded; an unknown opcode now stands in for the second isolation
+//       case.)
 //
 //   T6: Without cmd_valid_100m, opcode bus changes alone do NOT update
 //       host_adc_pwdn — the dispatcher only acts on validated commands.
@@ -147,9 +149,11 @@ module tb_adc_pwdn_opcode;
         issue_opcode(8'h33, 32'h0000_0001);
         check(host_adc_pwdn   === 1'b1,      "T5: opcode 0x33 doesn't disturb host_adc_pwdn");
         check(host_adc_format === 2'b01,     "T5: opcode 0x33 updates host_adc_format independently");
-        // Issue opcode 0x01 (radar_mode) — must NOT touch host_adc_pwdn.
-        issue_opcode(8'h01, 32'h0000_0002);
-        check(host_adc_pwdn === 1'b1,        "T5: opcode 0x01 doesn't disturb host_adc_pwdn");
+        // Issue an unknown opcode (0x05) — must NOT touch host_adc_pwdn.
+        // PR-AB.b expanded retired opcode 0x01 (radar_mode); use an unknown
+        // opcode instead to still cover the dispatch-isolation case.
+        issue_opcode(8'h05, 32'h0000_0002);
+        check(host_adc_pwdn === 1'b1,        "T5: unknown opcode 0x05 doesn't disturb host_adc_pwdn");
 
         // ---------- T6: opcode bus changes without cmd_valid_100m don't latch ----------
         // Snap state, drive opcode/value but withhold cmd_valid_100m.
@@ -207,18 +211,17 @@ module dispatch_block (
     output reg [1:0]   host_adc_format
 );
 
-    // Dummy reg for opcode 0x01 (radar_mode) — exercised only by T5.
-    reg [1:0] host_radar_mode;
+    // Unknown-opcode placeholder for T5 (dispatch isolation): opcode 0x05 is
+    // not a recognized opcode in production, so issuing it must not touch
+    // host_adc_pwdn or host_adc_format.
 
     always @(posedge clk or negedge reset_n) begin
         if (!reset_n) begin
             host_adc_pwdn   <= 1'b0;
             host_adc_format <= 2'b00;
-            host_radar_mode <= 2'b00;
         end else begin
             if (cmd_valid_100m) begin
                 case (usb_cmd_opcode)
-                    8'h01: host_radar_mode <= usb_cmd_value[1:0];
                     8'h32: host_adc_pwdn   <= usb_cmd_value[0];
                     8'h33: host_adc_format <= usb_cmd_value[1:0];
                     default: ;

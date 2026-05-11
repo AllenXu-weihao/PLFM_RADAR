@@ -73,7 +73,6 @@ module tb_usb_protocol_v2;
     // Status inputs (mostly tied off; PR-G additions below)
     reg        status_request = 1'b0;
     reg [15:0] status_cfar_threshold = 16'h1234;
-    reg [1:0]  status_radar_mode = 2'd0;
     reg [15:0] status_long_chirp = 16'd0;
     reg [15:0] status_long_listen = 16'd0;
     reg [15:0] status_guard = 16'd0;
@@ -84,7 +83,6 @@ module tb_usb_protocol_v2;
     reg [15:0] status_medium_chirp  = 16'd`RP_DEF_MEDIUM_CHIRP_CYCLES;
     reg [15:0] status_medium_listen = 16'd`RP_DEF_MEDIUM_LISTEN_CYCLES;
     reg [5:0]  status_chirps_per_elev = 6'd0;
-    reg [1:0]  status_range_mode = 2'd0;
     reg        status_chirps_mismatch = 1'b0;
     reg [4:0]  status_self_test_flags = 5'd0;
     reg [7:0]  status_self_test_detail = 8'd0;
@@ -140,7 +138,6 @@ module tb_usb_protocol_v2;
         .status_request(status_request),
         .status_cfar_threshold(status_cfar_threshold),
         .status_stream_ctrl(status_stream_ctrl),
-        .status_radar_mode(status_radar_mode),
         .status_long_chirp(status_long_chirp),
         .status_long_listen(status_long_listen),
         .status_guard(status_guard),
@@ -150,7 +147,6 @@ module tb_usb_protocol_v2;
         .status_medium_chirp(status_medium_chirp),
         .status_medium_listen(status_medium_listen),
         .status_chirps_per_elev(status_chirps_per_elev),
-        .status_range_mode(status_range_mode),
         .status_chirps_mismatch(status_chirps_mismatch),
         .status_self_test_flags(status_self_test_flags),
         .status_self_test_detail(status_self_test_detail),
@@ -297,12 +293,10 @@ module tb_usb_protocol_v2;
         check_b("T3.4: status_words[6] count_cand[7:0]=42", egress_bytes[26] == 8'd42);
         check_b("T3.5: status_words[6] thr_soft[15:8]=0x0A", egress_bytes[27] == 8'h0A);
         check_b("T3.6: status_words[6] thr_soft[7:0]=0xBC",  egress_bytes[28] == 8'hBC);
-        // alpha_soft (0x18) packed into word[4][9:2] → byte at index 19,20
-        // word[4] = {gain[3:0], peak[7:0], sat[7:0], en, mismatch, alpha_soft[7:0], range_mode[1:0]}
-        // bits[9:2] = alpha_soft. byte[19] = word[4][15:8], byte[20] = word[4][7:0]
-        // alpha_soft sits in byte[20][7:2] | byte[19][1:0] — let's just check mid bytes are non-zero
-        // when alpha_soft=0x18 (b0001_1000): bits[9:2] of word[4] = 8'h18, so:
-        //   word[4][7:0] = {alpha_soft[7:0], range_mode[1:0]} = {8'h18, 2'b00} = 8'h60
+        // alpha_soft (0x18) packed into word[4][9:2] → byte at index 19,20.
+        // PR-AB.b expanded: word[4][1:0] formerly range_mode, now reserved 2'd0.
+        // word[4] = {gain[3:0], peak[7:0], sat[7:0], en, mismatch, alpha_soft[7:0], 2'd0}
+        // When alpha_soft=0x18: word[4][7:0] = {8'h18, 2'b00} = 8'h60.
         check_b("T3.7: status_words[4][7:0] = alpha_soft<<2 = 0x60 (alpha=0x18)",
                 egress_bytes[20] == 8'h60);
         // M-5: status_words[7] = {medium_chirp, medium_listen}.

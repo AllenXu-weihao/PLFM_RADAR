@@ -75,14 +75,12 @@ module tb_ft2232h_frame_drop;
     reg        status_request = 1'b0;
     reg [15:0] status_cfar_threshold = 16'd0;
     reg [5:0]  status_stream_ctrl = 6'b000_000;
-    reg [1:0]  status_radar_mode = 2'd0;
     reg [15:0] status_long_chirp = 16'd0;
     reg [15:0] status_long_listen = 16'd0;
     reg [15:0] status_guard = 16'd0;
     reg [15:0] status_short_chirp = 16'd0;
     reg [15:0] status_short_listen = 16'd0;
     reg [5:0]  status_chirps_per_elev = 6'd0;
-    reg [1:0]  status_range_mode = 2'd0;
     reg        status_chirps_mismatch = 1'b0;
     reg [4:0]  status_self_test_flags = 5'd0;
     reg [7:0]  status_self_test_detail = 8'd0;
@@ -131,7 +129,6 @@ module tb_ft2232h_frame_drop;
         .status_request(status_request),
         .status_cfar_threshold(status_cfar_threshold),
         .status_stream_ctrl(status_stream_ctrl),
-        .status_radar_mode(status_radar_mode),
         .status_long_chirp(status_long_chirp),
         .status_long_listen(status_long_listen),
         .status_guard(status_guard),
@@ -142,7 +139,6 @@ module tb_ft2232h_frame_drop;
         .status_medium_chirp(16'd0),
         .status_medium_listen(16'd0),
         .status_chirps_per_elev(status_chirps_per_elev),
-        .status_range_mode(status_range_mode),
         .status_chirps_mismatch(status_chirps_mismatch),
         .status_self_test_flags(status_self_test_flags),
         .status_self_test_detail(status_self_test_detail),

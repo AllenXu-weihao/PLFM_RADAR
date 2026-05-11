@@ -14,12 +14,13 @@
 //          tb_e2e_dsp_to_host (PR-Z A6) end-to-end.
 //   G3  Safety architecture (TX/RX mixer mutual exclusion, ADC pwdn, ADAR TR,
 //        mixer-disable propagation)
-//   G7.1 Rapid chirp toggle CDC stress (100MHz STM32 -> 120MHz TX)
 //   G7.3 TX chirp counter CDC (120MHz -> 100MHz)
+//        — G7.1 (STM32→FPGA chirp toggle CDC stress) retired in PR-AB.b
+//          expanded; stm32_new_chirp port is gone.
 //
 // DUT is radar_system_top with USB_MODE=1 (production FT2232H path); the
-// FT2232H ports are wired so a minimal opcode can be sent if needed (none
-// are needed here — radar_mode defaults to 2'b00 STM32-driven).
+// FT2232H ports are wired so a stream_control opcode (0x04) can be sent at
+// start to give the USB write FSM a clean exit from IDLE.
 // ============================================================================
 
 module tb_system_mechanics;
@@ -51,9 +52,6 @@ reg         reset_n = 1'b0;
 reg [7:0]   adc_d_p = 8'h80;
 reg [7:0]   adc_d_n = 8'h7F;
 
-reg         stm32_new_chirp     = 1'b0;
-reg         stm32_new_elevation = 1'b0;
-reg         stm32_new_azimuth   = 1'b0;
 reg         stm32_mixers_enable = 1'b0;
 reg         stm32_sclk_3v3 = 1'b0;
 reg         stm32_mosi_3v3 = 1'b0;
@@ -108,7 +106,7 @@ reg         ft_data_drive_en = 1'b0;
 assign ft_data = ft_data_drive_en ? ft_data_drive : 8'hzz;
 pulldown pd[7:0] (ft_data);
 
-wire [5:0]  current_elevation, current_azimuth, current_chirp;
+wire [5:0]  current_chirp;
 wire        new_chirp_frame;
 wire [31:0] dbg_doppler_data;
 wire        dbg_doppler_valid;
@@ -157,9 +155,6 @@ radar_system_top #(.USB_MODE(1)) dut (
     .adc_or_p(1'b0), .adc_or_n(1'b1),
     .adc_pwdn(adc_pwdn),
 
-    .stm32_new_chirp(stm32_new_chirp),
-    .stm32_new_elevation(stm32_new_elevation),
-    .stm32_new_azimuth(stm32_new_azimuth),
     .stm32_mixers_enable(stm32_mixers_enable),
 
     .ft601_data(ft601_data),
@@ -184,8 +179,6 @@ radar_system_top #(.USB_MODE(1)) dut (
     .ft_oe_n(ft_oe_n),
     .ft_siwu(ft_siwu),
 
-    .current_elevation(current_elevation),
-    .current_azimuth(current_azimuth),
     .current_chirp(current_chirp),
     .new_chirp_frame(new_chirp_frame),
     .dbg_doppler_data(dbg_doppler_data),
@@ -197,16 +190,6 @@ radar_system_top #(.USB_MODE(1)) dut (
     .gpio_dig6(gpio_dig6),
     .gpio_dig7(gpio_dig7)
 );
-
-// ----------------------------------------------------------------------------
-// Helper: STM32 chirp toggle (drives stm32_new_chirp edge)
-// ----------------------------------------------------------------------------
-task stm32_chirp_toggle;
-    begin
-        stm32_new_chirp = ~stm32_new_chirp;
-        #40;  // hold 4 clk_100m cycles for edge detector
-    end
-endtask
 
 // ADC stimulus: ramp around mid-scale (matches tb_system_e2e pattern)
 integer adc_phase;
@@ -368,12 +351,11 @@ initial begin
     stm32_mixers_enable = 1'b1;
     #100;
 
-    // Fire one LONG chirp + 3 follow-ups so DAC, RF switch, and both mixers
-    // are exercised across TX (chirp) and RX (listen) phases.
-    stm32_chirp_toggle;
-    #40000;                 // 40 us — covers LONG_CHIRP -> LONG_LISTEN
+    // PR-AB.b expanded: scheduler auto-scans once mixers_enable=1 — no STM32
+    // chirp trigger needed. Wait long enough to observe DAC, RF switch, and
+    // both mixers exercised across TX (chirp) and RX (listen) phases.
+    #40000;                 // 40 us — covers initial LONG_CHIRP -> LONG_LISTEN
     for (i = 0; i < 3; i = i + 1) begin
-        stm32_chirp_toggle;
         #3000;
     end
     #5000;
@@ -412,21 +394,10 @@ initial begin
     #100;
 
     // ====================================================================
-    // GROUP 7.1 / 7.3: CDC CROSSING STRESS  (G7.2/7.4 in tb_system_opcodes)
+    // GROUP 7.3: TX chirp counter CDC  (G7.2/7.4 in tb_system_opcodes;
+    // G7.1 retired in PR-AB.b expanded — STM32→FPGA chirp CDC path removed)
     // ====================================================================
-    $display("\n--- Group 7: CDC crossing stress ---");
-
-    // G7.1: rapid chirp toggles — verify DAC stays active (CDC delivered).
-    // host_radar_mode defaults to 2'b00 (STM32-driven) at reset, so toggles
-    // drive the TX directly without an opcode.
-    obs_dac_nonzero_count = 0;
-    for (i = 0; i < 10; i = i + 1) begin
-        stm32_chirp_toggle;
-        #500;
-    end
-    #20000;
-    check(obs_dac_nonzero_count > 0,
-          "G7.1: CDC delivered chirp toggles (DAC active after rapid toggles)");
+    $display("\n--- Group 7: TX chirp counter CDC (120 MHz -> 100 MHz) ---");
 
     // G7.3: TX chirp counter CDC (120 MHz -> 100 MHz). Either the counter
     // advanced or DAC was active long enough to prove the path is alive.

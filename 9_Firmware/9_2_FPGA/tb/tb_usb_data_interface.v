@@ -62,14 +62,12 @@ module tb_usb_data_interface;
     reg         status_request;
     reg  [15:0] status_cfar_threshold;
     reg  [2:0]  status_stream_ctrl;
-    reg  [1:0]  status_radar_mode;
     reg  [15:0] status_long_chirp;
     reg  [15:0] status_long_listen;
     reg  [15:0] status_guard;
     reg  [15:0] status_short_chirp;
     reg  [15:0] status_short_listen;
     reg  [5:0]  status_chirps_per_elev;
-    reg  [1:0]  status_range_mode;
     reg         status_chirps_mismatch;
 
     // Self-test status readback inputs
@@ -126,14 +124,12 @@ module tb_usb_data_interface;
         .status_request        (status_request),
         .status_cfar_threshold (status_cfar_threshold),
         .status_stream_ctrl    (status_stream_ctrl),
-        .status_radar_mode     (status_radar_mode),
         .status_long_chirp     (status_long_chirp),
         .status_long_listen    (status_long_listen),
         .status_guard          (status_guard),
         .status_short_chirp    (status_short_chirp),
         .status_short_listen   (status_short_listen),
         .status_chirps_per_elev(status_chirps_per_elev),
-        .status_range_mode     (status_range_mode),
         .status_chirps_mismatch(status_chirps_mismatch),
 
         // Self-test status readback
@@ -197,14 +193,12 @@ module tb_usb_data_interface;
             status_request        = 0;
             status_cfar_threshold = 16'd10000;
             status_stream_ctrl    = 3'b111;
-            status_radar_mode     = 2'b00;
             status_long_chirp     = 16'd3000;
             status_long_listen    = 16'd13700;
             status_guard          = 16'd17540;
             status_short_chirp    = 16'd50;
             status_short_listen   = 16'd17450;
             status_chirps_per_elev = 6'd32;
-            status_range_mode     = 2'b00;
             status_chirps_mismatch = 1'b0;
             status_self_test_flags  = 5'b00000;
             status_self_test_detail = 8'd0;
@@ -926,14 +920,12 @@ module tb_usb_data_interface;
         // Set known status input values
         status_cfar_threshold  = 16'hABCD;
         status_stream_ctrl     = 3'b101;
-        status_radar_mode      = 2'b01;
         status_long_chirp      = 16'd3000;
         status_long_listen     = 16'd13700;
         status_guard           = 16'd17540;
         status_short_chirp     = 16'd50;
         status_short_listen    = 16'd17450;
         status_chirps_per_elev = 6'd32;
-        status_range_mode      = 2'b10;  // Long-range for status test
         status_chirps_mismatch = 1'b1;   // TX-G: exercise the new bit too
         // Self-test status: all 5 tests passed, detail=0xA5, not busy
         status_self_test_flags  = 5'b11111;
@@ -978,8 +970,9 @@ module tb_usb_data_interface;
               "Status readback: word 2 = {guard, short_chirp}");
         check(uut.status_words[3] === {16'd17450, 10'd0, 6'd32},
               "Status readback: word 3 = {short_listen, 0, chirps_per_elev}");
-        check(uut.status_words[4] === {4'd5, 8'd180, 8'd12, 1'b1, 1'b1, 8'd0, 2'b10},
-              "Status readback: word 4 = {agc_gain=5, peak=180, sat=12, en=1, mismatch=1, range_mode=2}");
+        // PR-AB.b expanded: status_words[4][1:0] formerly range_mode, now reserved 2'd0.
+        check(uut.status_words[4] === {4'd5, 8'd180, 8'd12, 1'b1, 1'b1, 8'd0, 2'b00},
+              "Status readback: word 4 = {agc_gain=5, peak=180, sat=12, en=1, mismatch=1, reserved=0}");
         // status_words[5] = {7'd0, busy, 8'd0, detail[7:0], 3'd0, flags[4:0]}
         // = {7'd0, 1'b0, 8'd0, 8'hA5, 3'd0, 5'b11111}
         check(uut.status_words[5] === {7'd0, 1'b0, 8'd0, 8'hA5, 3'd0, 5'b11111},

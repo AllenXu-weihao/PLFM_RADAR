@@ -46,9 +46,6 @@ reg [7:0]   adc_d_p = 8'h80;
 reg [7:0]   adc_d_n = 8'h7F;
 
 // STM32 control — tied off
-reg         stm32_new_chirp     = 1'b0;
-reg         stm32_new_elevation = 1'b0;
-reg         stm32_new_azimuth   = 1'b0;
 reg         stm32_mixers_enable = 1'b0;
 reg         stm32_sclk_3v3 = 1'b0;
 reg         stm32_mosi_3v3 = 1'b0;
@@ -110,7 +107,7 @@ assign ft_data = ft_data_drive_en ? ft_data_drive : 8'hzz;
 pulldown pd[7:0] (ft_data);
 
 // Status / debug outputs (mostly ignored)
-wire [5:0]  current_elevation, current_azimuth, current_chirp;
+wire [5:0]  current_chirp;
 wire        new_chirp_frame;
 wire [31:0] dbg_doppler_data;
 wire        dbg_doppler_valid;
@@ -161,9 +158,6 @@ radar_system_top #(
     .adc_or_p(1'b0), .adc_or_n(1'b1),
     .adc_pwdn(adc_pwdn),
 
-    .stm32_new_chirp(stm32_new_chirp),
-    .stm32_new_elevation(stm32_new_elevation),
-    .stm32_new_azimuth(stm32_new_azimuth),
     .stm32_mixers_enable(stm32_mixers_enable),
 
     // FT601 ports — tied off / unused in USB_MODE=1
@@ -190,8 +184,6 @@ radar_system_top #(
     .ft_oe_n(ft_oe_n),
     .ft_siwu(ft_siwu),
 
-    .current_elevation(current_elevation),
-    .current_azimuth(current_azimuth),
     .current_chirp(current_chirp),
     .new_chirp_frame(new_chirp_frame),
     .dbg_doppler_data(dbg_doppler_data),
@@ -254,13 +246,6 @@ integer pass_count = 0;
 integer fail_count = 0;
 integer test_num   = 0;
 
-// Sticky flag for G6.6 (host_trigger_pulse is a 1-cycle self-clearing pulse).
-reg trigger_pulse_seen = 1'b0;
-always @(posedge clk_100m) begin
-    if (!reset_n)                       trigger_pulse_seen <= 1'b0;
-    else if (dut.host_trigger_pulse)    trigger_pulse_seen <= 1'b1;
-end
-
 task check;
     input         cond;
     input [80*8-1:0] msg;
@@ -291,14 +276,10 @@ initial begin
     wait_clk(50);
 
     // ====================================================================
-    // GROUP 6: USB COMMAND DECODE (was tb_system_e2e G6)
+    // GROUP 6: USB COMMAND DECODE (was tb_system_e2e G6;
+    // G6.1 radar_mode / G6.6 trigger_pulse retired in PR-AB.b expanded)
     // ====================================================================
     $display("\n--- Group 6: USB Command Decode ---");
-
-    // G6.1: Set radar mode (opcode 0x01) -> host_radar_mode[1:0]
-    send_cmd(8'h01, 8'h00, 16'h0002);
-    check(dut.host_radar_mode == 2'b10,
-          "G6.1: 0x01 -> host_radar_mode = 2'b10 (single chirp)");
 
     // G6.2: Set detection threshold (0x03) -> host_detect_threshold
     send_cmd(8'h03, 8'h00, 16'h1234);
@@ -323,15 +304,6 @@ initial begin
           "G6.5: 0x15 -> host_chirps_per_elev = 48");
     check(dut.chirps_mismatch_error == 1'b0,
           "G6.5b: chirps_mismatch_error clear when chirps==48");
-
-    // G6.6: Trigger pulse (0x02) — self-clearing, latches host_trigger_pulse
-    // for one clk_100m cycle. Capture via a flag set on rising edge.
-    @(posedge clk_100m);
-    send_cmd(8'h02, 8'h00, 16'h0000);
-    // host_trigger_pulse self-clears the cycle after; we observed it via
-    // a sticky flag (see below).
-    check(trigger_pulse_seen == 1'b1,
-          "G6.6: 0x02 trigger pulse observed");
 
     // ====================================================================
     // GROUP 7: USB COMMAND CDC INTEGRITY (was G7.2 / G7.4)
@@ -386,24 +358,10 @@ initial begin
           "G13.8: Mismatch clears when restored to 48");
 
     // ====================================================================
-    // GROUP 14: CFAR + RANGE-MODE OPCODES
+    // GROUP 14: CFAR OPCODES  (G14.1/.2/.3 range_mode retired in PR-AB.b
+    // expanded — opcode 0x20 / host_range_mode are gone)
     // ====================================================================
-    $display("\n--- Group 14: CFAR / Range-Mode Opcodes ---");
-
-    // G14.1: range_mode=0x01 (long-range)
-    send_cmd(8'h20, 8'h00, 16'h0001);
-    check(dut.host_range_mode == 2'b01,
-          "G14.1: 0x20 -> host_range_mode = 2'b01 (long-range)");
-
-    // G14.2: range_mode=0x02 (reserved, stored as-is)
-    send_cmd(8'h20, 8'h00, 16'h0002);
-    check(dut.host_range_mode == 2'b10,
-          "G14.2: 0x20 -> host_range_mode = 2'b10 (reserved)");
-
-    // G14.3: range_mode=0x00 (3 km)
-    send_cmd(8'h20, 8'h00, 16'h0000);
-    check(dut.host_range_mode == 2'b00,
-          "G14.3: 0x20 -> host_range_mode = 2'b00 (3 km)");
+    $display("\n--- Group 14: CFAR Opcodes ---");
 
     // G14.4-5: CFAR guard cells (0x21)
     send_cmd(8'h21, 8'h00, 16'h0004);
