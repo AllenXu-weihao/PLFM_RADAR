@@ -233,6 +233,15 @@ set_input_delay -clock [get_clocks ft601_clk_in] -min 1.000 [get_ports {ft601_rx
 # --------------------------------------------------------------------------
 # FT601 output timing — source-synchronous, datapath-only constraints
 # --------------------------------------------------------------------------
+# VARIANT STRATEGY: this is the FMC-board approach. The production board XDC
+# (constraints/xc7a200t_fbg484.xdc, "FT601 output delay relative to ODDR-
+# forwarded clock" section) uses a DIFFERENT strategy
+# (create_generated_clock ft601_clk_fwd + set_output_delay) because the
+# production board DOES forward ft601_clk_out via ODDR back to the FT601.
+# Only ONE of these XDCs should be included per build. Do NOT mix or both
+# will fight each other (conflicting or over-constrained timing on the same
+# ports).
+#
 # The FT601 provides its own 100 MHz clock (D_CLK) and samples data on
 # the next rising edge of that same clock. The FPGA receives D_CLK through
 # IBUF→BUFG (~5 ns insertion), but this insertion delay is COMMON to both

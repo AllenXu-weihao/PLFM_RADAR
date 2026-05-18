@@ -568,7 +568,16 @@ set_false_path -hold -from [get_clocks clk_120m_dac] -to [get_clocks dac_clk_fwd
 # --------------------------------------------------------------------------
 # FT601 output delay relative to ODDR-forwarded clock
 # --------------------------------------------------------------------------
-# ft601_clk_out is now forwarded via ODDR from ft601_clk_in BUFG output.
+# VARIANT STRATEGY: this is the PRODUCTION-board approach. The TE0713/TE0701
+# FMC dev variant uses a DIFFERENT strategy (set_max_delay -datapath_only,
+# no forwarded clock) because the UMFT601X-B FMC adapter has no return
+# path for ft601_clk_out — see constraints/te0713_te0701_umft601x.xdc
+# "FT601 output timing" section for the FMC rationale. Only ONE of these
+# XDCs should be included per build (set in the Vivado project per board
+# variant). Do NOT mix or both will fight each other (conflicting or
+# over-constrained timing on the same ports).
+#
+# ft601_clk_out is forwarded via ODDR from ft601_clk_in BUFG output.
 # Since both data FFs and clock ODDR are driven by the same BUFG, insertion
 # delays cancel. Output delay only needs to cover FT601 Tsu/Th + trace skew.
 #
@@ -631,6 +640,13 @@ set_false_path -from [get_clocks clk_120m_dac] -to [get_clocks clk_100m]
 # clk_100m ↔ ft601_clk_in: USB data interface has CDC synchronizers
 set_false_path -from [get_clocks clk_100m] -to [get_clocks ft601_clk_in]
 set_false_path -from [get_clocks ft601_clk_in] -to [get_clocks clk_100m]
+# ft601_txe is captured in BOTH the ft601_clk_in domain (write FSM in
+# usb_data_interface.v gates on `!ft601_txe`) AND the clk_100m domain
+# (cdc_single_bit synchronizer in radar_system_top.v drives status_reg[1]
+# for host telemetry). The set_input_delay on ft601_txe (earlier in this
+# file, in the FT601 input timing block) covers the ft601_clk_in capture;
+# this false_path covers the async port → clk_100m sync-FF path, which is
+# an explicit CDC and not source-synchronous to ft601_clk_in.
 set_false_path -from [get_ports {ft601_txe}] -to [all_registers -clock [get_clocks clk_100m]]
 
 # clk_120m_dac ↔ ft601_clk_in: no direct data path expected
@@ -711,9 +727,13 @@ set_property IOB TRUE [get_cells -hierarchical -filter {NAME =~ *oddr_ft601_clk*
 set_property -quiet IOB TRUE [get_cells -hierarchical -filter {NAME =~ *usb_inst/ft601_data_out_reg*}]
 set_property -quiet IOB TRUE [get_cells -hierarchical -filter {NAME =~ *usb_inst/ft601_be_reg*}]
 set_property IOB TRUE [get_cells -hierarchical -filter {NAME =~ *usb_inst/ft601_wr_n_reg*}]
-# ft601_rd_n and ft601_oe_n are constant-1 (USB read not implemented) —
-# Vivado removes the registers via constant propagation. Use -quiet to
-# suppress CRITICAL WARNING [Common 17-55] when the cells don't exist.
+# ft601_rd_n and ft601_oe_n are driven by the host-command read FSM
+# (RD_OE_ASSERT / RD_READING / RD_DEASSERT in usb_data_interface.v). They
+# carry real toggling traffic and are constrained by the set_output_delay
+# block above. -quiet stays because Vivado may consolidate the register
+# names during synthesis (retiming into the FSM state register), in which
+# case the filter returns no objects and the WARNING is benign — timing
+# is still met via the set_output_delay constraints.
 set_property -quiet IOB TRUE [get_cells -hierarchical -filter {NAME =~ *usb_inst/ft601_rd_n_reg*}]
 set_property -quiet IOB TRUE [get_cells -hierarchical -filter {NAME =~ *usb_inst/ft601_oe_n_reg*}]
 
